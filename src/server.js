@@ -44,6 +44,24 @@ app.use(express.urlencoded({extended:true}));
 app.use(express.json());
 const styleCss = require('./style-data');
 app.get('/style.css',(req,res)=> res.type('text/css; charset=utf-8').send(styleCss));
+const icons = require('./icons-data');
+const iconBuf = {
+  apple: Buffer.from(icons.apple,'base64'),
+  i192: Buffer.from(icons.i192,'base64'),
+  fav32: Buffer.from(icons.fav32,'base64'),
+  i1024: Buffer.from(icons.i1024,'base64'),
+};
+app.get('/apple-touch-icon.png',(req,res)=> res.type('image/png').send(iconBuf.apple));
+app.get('/apple-touch-icon-precomposed.png',(req,res)=> res.type('image/png').send(iconBuf.apple));
+app.get('/icon-192.png',(req,res)=> res.type('image/png').send(iconBuf.i192));
+app.get('/icon-512.png',(req,res)=> res.type('image/png').send(iconBuf.i1024));
+app.get('/favicon.png',(req,res)=> res.type('image/png').send(iconBuf.fav32));
+app.get('/favicon.ico',(req,res)=> res.type('image/png').send(iconBuf.fav32));
+app.get('/site.webmanifest',(req,res)=> res.type('application/manifest+json').send(JSON.stringify({
+  name:'مكتبة القارئ', short_name:'مكتبة القارئ', start_url:'/', display:'standalone',
+  background_color:'#172542', theme_color:'#172542',
+  icons:[{src:'/icon-192.png',sizes:'192x192',type:'image/png'},{src:'/icon-512.png',sizes:'512x512',type:'image/png'}]
+})));
 app.use(express.static(path.join(__dirname,'..','public')));
 app.use(cookieSession({
   name:'readerlib',
