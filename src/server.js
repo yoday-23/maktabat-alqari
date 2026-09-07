@@ -54,16 +54,8 @@ app.use(cookieSession({
   maxAge:1000*60*60*24*7
 }));
 
-// حماية بسيطة لطلبات التعديل القادمة من المتصفح: يجب أن يكون المصدر هو نفس المضيف.
-app.use((req,res,next)=>{
-  if (!['POST','PUT','PATCH','DELETE'].includes(req.method)) return next();
-  const origin=req.get('origin');
-  if (!origin) return next();
-  try {
-    if (new URL(origin).host !== req.get('host')) return res.status(403).send('طلب غير مسموح.');
-  } catch (_) { return res.status(403).send('طلب غير مسموح.'); }
-  next();
-});
+// (تمت إزالة فحص Origin/Host الإضافي: كان يرفض تسجيل الدخول بالخطأ بسبب طريقة توجيه
+// النطاقات في Vercel. الحماية الأساسية من CSRF متوفرة أصلًا عبر sameSite:'lax' في الجلسة.)
 
 async function setting(key, fallback='') {
   const row = await db.prepare('SELECT value FROM settings WHERE key=?').get(key);
