@@ -142,21 +142,30 @@ app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
 app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
   if(!week){flash(req,'error','لا يوجد أسبوع مفتوح حاليًا.'); return res.redirect('/week');}
-  const type=req.body.activity_type;
-  const minutes=Number(req.body.minutes);
   const notes=(req.body.notes||'').trim();
-  if(!['reading','listening'].includes(type)||!Number.isInteger(minutes)||minutes<1||minutes>1440){flash(req,'error','تحقق من نوع النشاط وعدد الدقائق.');return res.redirect('/week');}
-  const duplicate=await db.prepare(`SELECT id FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND activity_type=? AND minutes=? AND status IN ('pending','approved')`).get(req.session.user.id,week.id,type,minutes);
-  if(duplicate){flash(req,'error','يوجد إنجاز مماثل مسجل لهذا الأسبوع بالفعل.');return res.redirect('/week');}
-  const approvalRequired=(await setting('approval_required','1'))==='1';
-  if(approvalRequired){
-    await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status) VALUES(?,?,?,?,?,?)').run(req.session.user.id,week.id,type,minutes,notes,'pending');
-    flash(req,'success','تم إرسال الإنجاز وبانتظار اعتماد المشرف.');
-  } else {
-    const result=await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status,reviewed_at) VALUES(?,?,?,?,?,?,now())').run(req.session.user.id,week.id,type,minutes,notes,'approved');
-    await approveLog(result.lastInsertRowid,null,'اعتماد تلقائي');
-    flash(req,'success','تم تسجيل الإنجاز واعتماده تلقائيًا.');
+  const entries=[];
+  for(const type of ['reading','listening']){
+    const raw=req.body[`${type}_minutes`];
+    if(raw===undefined||raw==='') continue;
+    const minutes=Number(raw);
+    if(!Number.isInteger(minutes)||minutes<1||minutes>1440){flash(req,'error','تحقق من عدد الدقائق (بين 1 و1440).');return res.redirect('/week');}
+    entries.push({type,minutes});
   }
+  if(!entries.length){flash(req,'error','أدخل دقائق القراءة أو الاستماع (أو كلاهما).');return res.redirect('/week');}
+  for(const {type,minutes} of entries){
+    const duplicate=await db.prepare(`SELECT id FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND activity_type=? AND minutes=? AND status IN ('pending','approved')`).get(req.session.user.id,week.id,type,minutes);
+    if(duplicate){flash(req,'error',`يوجد إنجاز ${type==='reading'?'قراءة':'استماع'} مماثل مسجل لهذا الأسبوع بالفعل.`);return res.redirect('/week');}
+  }
+  const approvalRequired=(await setting('approval_required','1'))==='1';
+  for(const {type,minutes} of entries){
+    if(approvalRequired){
+      await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status) VALUES(?,?,?,?,?,?)').run(req.session.user.id,week.id,type,minutes,notes,'pending');
+    } else {
+      const result=await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status,reviewed_at) VALUES(?,?,?,?,?,?,now())').run(req.session.user.id,week.id,type,minutes,notes,'approved');
+      await approveLog(result.lastInsertRowid,null,'اعتماد تلقائي');
+    }
+  }
+  flash(req,'success',approvalRequired?'تم إرسال إنجازك وبانتظار اعتماد المشرف.':'تم تسجيل إنجازك واعتماده تلقائيًا.');
   res.redirect('/week');
 }));
 
