@@ -105,6 +105,7 @@ app.use(async (req,res,next)=>{
   }
   catch (e) { return next(e); }
   res.locals.path=req.path;
+  res.locals.origin=`${req.protocol}://${req.get('host')}`;
   next();
 });
 
