@@ -1,37 +1,49 @@
 const express = require('express');
 const path = require('path');
-const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const helmet = require('helmet');
 const cookieSession = require('cookie-session');
+const ejs = require('ejs');
 const db = require('./db');
-
-// يجبر أداة تتبع الملفات في Vercel (nft) على تضمين مجلدي views وpublic كاملين
-// داخل حزمة الدالة، لأنها لا تكتشف الملفات التي يفتحها محرك العرض EJS ديناميكيًا.
-(function bundleStaticDirs(){
-  for (const dir of [path.join(__dirname,'..','views'), path.join(__dirname,'..','public')]) {
-    try {
-      const entries = fs.readdirSync(dir, { recursive: true });
-      for (const entry of entries) {
-        const full = path.join(dir, entry);
-        try { if (fs.statSync(full).isFile()) fs.readFileSync(full); } catch (_) {}
-      }
-    } catch (_) {}
-  }
-})();
+const viewTemplates = require('./views-data');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
+
+// نعرض القوالب من نسخة مضمّنة في الكود (src/views-data.js) بدل الاعتماد على قراءة
+// ملفات .ejs من القرص، لأن أدوات تتبع الملفات في Vercel لا تكتشف بشكل موثوق الملفات
+// التي يفتحها محرك عرض EJS بشكل ديناميكي عند التشغيل.
+function renderView(res, status, name, data) {
+  const template = viewTemplates[name];
+  if (!template) {
+    res.status(500).type('text/plain; charset=utf-8').send(`قالب غير موجود: ${name}`);
+    return;
+  }
+  const merged = Object.assign({}, res.locals, data);
+  const html = ejs.render(template, merged, {
+    includer(originalPath) {
+      const key = originalPath.replace(/^\.\//, '');
+      if (!viewTemplates[key]) throw new Error(`Include not found: ${originalPath}`);
+      return { template: viewTemplates[key] };
+    },
+  });
+  res.status(status).send(html);
+}
+app.use((req, res, next) => {
+  res.renderView = (name, data, status = 200) => renderView(res, status, name, data);
+  next();
+});
 const SESSION_SECRET = process.env.SESSION_SECRET || 'local-dev-change-me';
 const missingSecretInProd = process.env.NODE_ENV === 'production' && SESSION_SECRET === 'local-dev-change-me';
 if (missingSecretInProd) console.error('تحذير: SESSION_SECRET غير مضبوط في بيئة الإنتاج.');
-app.set('view engine','ejs');
-app.set('views',path.join(__dirname,'..','views'));
+app.set('trust proxy', 1);
 app.use(helmet({contentSecurityPolicy:false}));
 app.use(express.urlencoded({extended:true}));
 app.use(express.json());
+const styleCss = require('./style-data');
+app.get('/style.css',(req,res)=> res.type('text/css; charset=utf-8').send(styleCss));
 app.use(express.static(path.join(__dirname,'..','public')));
 app.use(cookieSession({
   name:'readerlib',
@@ -69,7 +81,7 @@ async function expireVouchers(){
   await db.prepare("UPDATE vouchers SET status='expired' WHERE status='unused' AND expires_at IS NOT NULL AND expires_at < now()").run();
 }
 function auth(req,res,next){ if(!req.session.user) return res.redirect('/login'); next(); }
-function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session.user?.role) ? next() : res.status(403).render('message',{title:'غير مصرح',message:'لا تملك صلاحية الوصول إلى هذه الصفحة.'}); }
+function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session.user?.role) ? next() : res.renderView('message',{title:'غير مصرح',message:'لا تملك صلاحية الوصول إلى هذه الصفحة.'},403); }
 function participantOnly(req,res,next){ return roles('participant')(req,res,next); }
 function adminOnly(req,res,next){ return roles('supervisor','manager')(req,res,next); }
 
@@ -84,12 +96,12 @@ app.use(async (req,res,next)=>{
 });
 
 app.get('/',(req,res)=> res.redirect(req.session.user ? (req.session.user.role==='participant'?'/dashboard':'/admin') : '/login'));
-app.get('/login',(req,res)=> res.render('login',{title:'تسجيل الدخول'}));
+app.get('/login',(req,res)=> res.renderView('login',{title:'تسجيل الدخول'}));
 app.post('/login', wrap(async (req,res)=>{
   const {username,password}=req.body;
   const user=await db.prepare('SELECT * FROM users WHERE username=? AND active=1').get((username||'').trim());
   if(!user || !bcrypt.compareSync(password||'',user.password_hash)){
-    return res.status(401).render('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'});
+    return res.renderView('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'},401);
   }
   req.session.user={id:user.id,name:user.name,role:user.role};
   res.redirect(user.role==='participant'?'/dashboard':'/admin');
@@ -124,13 +136,13 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
     ORDER BY r.price_minutes ASC LIMIT 1`).get(p.wallet_minutes,p.lifetime_minutes,p.id);
   const tx=await db.prepare('SELECT * FROM transactions WHERE participant_id=? ORDER BY id DESC LIMIT 7').all(p.id);
   const notifications=await db.prepare('SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 5').all(p.id);
-  res.render('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications});
+  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications});
 }));
 
 app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
   const logs=week?await db.prepare('SELECT * FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? ORDER BY id DESC').all(req.session.user.id,week.id):[];
-  res.render('week',{title:'هذا الأسبوع',week,logs});
+  res.renderView('week',{title:'هذا الأسبوع',week,logs});
 }));
 app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
@@ -177,7 +189,7 @@ const approveLog = db.transaction(async (logId, reviewerId, note='')=>{
 app.get('/rank',auth,participantOnly,wrap(async (req,res)=>{
   const p=await participantSummary(req.session.user.id);
   const ranks=await db.prepare('SELECT * FROM ranks WHERE active=1 ORDER BY min_minutes').all();
-  res.render('rank',{title:'رتبتي',p,ranks});
+  res.renderView('rank',{title:'رتبتي',p,ranks});
 }));
 
 app.get('/store',auth,participantOnly,wrap(async (req,res)=>{
@@ -185,7 +197,7 @@ app.get('/store',auth,participantOnly,wrap(async (req,res)=>{
   const rewards=await db.prepare(`SELECT r.*,rk.name min_rank_name,rk.min_minutes min_rank_minutes,
     (SELECT COUNT(*) FROM purchases pu WHERE pu.reward_id=r.id AND pu.participant_id=?) my_purchases
     FROM rewards r LEFT JOIN ranks rk ON rk.id=r.min_rank_id WHERE r.active=1 ORDER BY r.price_minutes`).all(p.id);
-  res.render('store',{title:'متجر المكتبة',p,rewards});
+  res.renderView('store',{title:'متجر المكتبة',p,rewards});
 }));
 
 function voucherCode(){ return crypto.randomBytes(4).toString('hex').toUpperCase(); }
@@ -233,10 +245,10 @@ app.get('/vouchers',auth,participantOnly,wrap(async (req,res)=>{
   const vouchers=await db.prepare(`SELECT v.*,r.name reward_name,r.icon,r.description,p.price_minutes,p.purchased_at
     FROM vouchers v JOIN purchases p ON p.id=v.purchase_id JOIN rewards r ON r.id=p.reward_id
     WHERE p.participant_id=? ORDER BY v.id DESC`).all(req.session.user.id);
-  res.render('vouchers',{title:'قسائمي',vouchers});
+  res.renderView('vouchers',{title:'قسائمي',vouchers});
 }));
 
-app.get('/account',auth,participantOnly,(req,res)=> res.render('account',{title:'حسابي'}));
+app.get('/account',auth,participantOnly,(req,res)=> res.renderView('account',{title:'حسابي'}));
 app.post('/account/password',auth,participantOnly,wrap(async (req,res)=>{
   const current=req.body.current_password||'', next=req.body.new_password||'', confirm=req.body.confirm_password||'';
   const user=await db.prepare('SELECT * FROM users WHERE id=?').get(req.session.user.id);
@@ -249,13 +261,13 @@ app.post('/account/password',auth,participantOnly,wrap(async (req,res)=>{
 
 app.get('/history',auth,participantOnly,wrap(async (req,res)=>{
   const tx=await db.prepare('SELECT * FROM transactions WHERE participant_id=? ORDER BY id DESC').all(req.session.user.id);
-  res.render('history',{title:'سجل مكتبتي',tx});
+  res.renderView('history',{title:'سجل مكتبتي',tx});
 }));
 
 app.get('/leaderboard',auth,participantOnly,wrap(async (req,res)=>{
-  if((await setting('leaderboard_enabled','1'))!=='1') return res.render('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
+  if((await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
   const rows=await db.prepare(`SELECT u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 20`).all();
-  res.render('leaderboard',{title:'المتميزون',rows});
+  res.renderView('leaderboard',{title:'المتميزون',rows});
 }));
 
 // Admin
@@ -273,12 +285,12 @@ app.get('/admin',auth,adminOnly,wrap(async (req,res)=>{
     spent:Math.abs(Number(spentRow.s)),
   };
   const pending=await db.prepare(`SELECT a.*,u.name,w.week_number FROM activity_logs a JOIN users u ON u.id=a.participant_id JOIN weekly_goals w ON w.id=a.weekly_goal_id WHERE a.status='pending' ORDER BY a.id DESC LIMIT 8`).all();
-  res.render('admin-dashboard',{title:'لوحة التحكم',stats,pending});
+  res.renderView('admin-dashboard',{title:'لوحة التحكم',stats,pending});
 }));
 
 app.get('/admin/approvals',auth,adminOnly,wrap(async (req,res)=>{
   const logs=await db.prepare(`SELECT a.*,u.name,w.week_number FROM activity_logs a JOIN users u ON u.id=a.participant_id JOIN weekly_goals w ON w.id=a.weekly_goal_id WHERE a.status='pending' ORDER BY a.id ASC`).all();
-  res.render('admin-approvals',{title:'الإنجازات المعلقة',logs});
+  res.renderView('admin-approvals',{title:'الإنجازات المعلقة',logs});
 }));
 app.post('/admin/approvals/:id/approve',auth,adminOnly,wrap(async (req,res)=>{
   try{ await approveLog(Number(req.params.id),req.session.user.id,req.body.note||''); flash(req,'success','تم اعتماد الإنجاز وإضافة الدقائق.'); }
@@ -298,7 +310,7 @@ app.post('/admin/approvals/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
 app.get('/admin/participants',auth,adminOnly,wrap(async (req,res)=>{
   const participants=await db.prepare(`SELECT u.id,u.name,u.username,u.active,p.* FROM users u JOIN participants p ON p.user_id=u.id ORDER BY u.name`).all();
   const withRanks = await Promise.all(participants.map(async pt => ({...pt, rank: await getRank(pt.lifetime_minutes)})));
-  res.render('admin-participants',{title:'المشاركون',participants:withRanks});
+  res.renderView('admin-participants',{title:'المشاركون',participants:withRanks});
 }));
 app.post('/admin/participants/add',auth,adminOnly,wrap(async (req,res)=>{
   try{
@@ -348,7 +360,7 @@ app.post('/admin/participants/:id/adjust',auth,adminOnly,wrap(async (req,res)=>{
 }));
 
 app.get('/admin/weeks',auth,adminOnly,wrap(async (req,res)=>{
-  res.render('admin-weeks',{title:'الأسابيع',weeks:await db.prepare('SELECT * FROM weekly_goals ORDER BY week_number').all()});
+  res.renderView('admin-weeks',{title:'الأسابيع',weeks:await db.prepare('SELECT * FROM weekly_goals ORDER BY week_number').all()});
 }));
 app.post('/admin/weeks/add',auth,adminOnly,wrap(async (req,res)=>{
   try{
@@ -365,7 +377,7 @@ app.post('/admin/weeks/:id/update',auth,adminOnly,wrap(async (req,res)=>{
 }));
 
 app.get('/admin/ranks',auth,adminOnly,wrap(async (req,res)=>{
-  res.render('admin-ranks',{title:'الرتب',ranks:await db.prepare('SELECT * FROM ranks ORDER BY min_minutes').all()});
+  res.renderView('admin-ranks',{title:'الرتب',ranks:await db.prepare('SELECT * FROM ranks ORDER BY min_minutes').all()});
 }));
 app.post('/admin/ranks/add',auth,adminOnly,wrap(async (req,res)=>{
   try{ await db.prepare('INSERT INTO ranks(name,icon,description,min_minutes,sort_order,active) VALUES(?,?,?,?,?,1)').run(req.body.name,req.body.icon||'📖',req.body.description||'',Number(req.body.min_minutes),Number(req.body.sort_order)||1); flash(req,'success','تمت إضافة الرتبة.'); }
@@ -381,7 +393,7 @@ app.post('/admin/ranks/:id/update',auth,adminOnly,wrap(async (req,res)=>{
 app.get('/admin/rewards',auth,adminOnly,wrap(async (req,res)=>{
   const rewards=await db.prepare(`SELECT r.*,rk.name rank_name,(SELECT COUNT(*) FROM purchases p WHERE p.reward_id=r.id) buys,(SELECT COUNT(*) FROM vouchers v JOIN purchases p ON p.id=v.purchase_id WHERE p.reward_id=r.id AND v.status='used') used FROM rewards r LEFT JOIN ranks rk ON rk.id=r.min_rank_id ORDER BY r.id DESC`).all();
   const ranks=await db.prepare('SELECT * FROM ranks WHERE active=1 ORDER BY min_minutes').all();
-  res.render('admin-rewards',{title:'المتجر',rewards,ranks});
+  res.renderView('admin-rewards',{title:'المتجر',rewards,ranks});
 }));
 app.post('/admin/rewards/add',auth,adminOnly,wrap(async (req,res)=>{
   try{ await db.prepare(`INSERT INTO rewards(name,icon,description,price_minutes,quantity,available_from,available_until,min_rank_id,purchase_limit,active) VALUES(?,?,?,?,?,?,?,?,?,1)`).run(req.body.name,req.body.icon||'🎁',req.body.description||'',Number(req.body.price_minutes),Number(req.body.quantity),req.body.available_from||null,req.body.available_until||null,req.body.min_rank_id?Number(req.body.min_rank_id):null,req.body.purchase_limit?Number(req.body.purchase_limit):null); flash(req,'success','تمت إضافة المكافأة.'); }
@@ -401,7 +413,7 @@ app.post('/admin/rewards/:id/toggle',auth,adminOnly,wrap(async (req,res)=>{
 app.get('/admin/vouchers',auth,adminOnly,wrap(async (req,res)=>{
   await expireVouchers();
   const vouchers=await db.prepare(`SELECT v.*,u.name participant_name,r.name reward_name,r.icon FROM vouchers v JOIN purchases p ON p.id=v.purchase_id JOIN users u ON u.id=p.participant_id JOIN rewards r ON r.id=p.reward_id ORDER BY v.id DESC`).all();
-  res.render('admin-vouchers',{title:'القسائم',vouchers});
+  res.renderView('admin-vouchers',{title:'القسائم',vouchers});
 }));
 app.post('/admin/vouchers/:id/use',auth,adminOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id);
@@ -416,12 +428,12 @@ app.post('/admin/vouchers/:id/cancel',auth,adminOnly,wrap(async (req,res)=>{
 
 app.get('/admin/transactions',auth,adminOnly,wrap(async (req,res)=>{
   const rows=await db.prepare(`SELECT t.*,u.name participant_name,actor.name actor_name FROM transactions t JOIN users u ON u.id=t.participant_id LEFT JOIN users actor ON actor.id=t.created_by ORDER BY t.id DESC LIMIT 500`).all();
-  res.render('admin-transactions',{title:'سجل المعاملات',rows});
+  res.renderView('admin-transactions',{title:'سجل المعاملات',rows});
 }));
 
 app.get('/admin/staff',auth,roles('manager'),wrap(async (req,res)=>{
   const staff=await db.prepare("SELECT id,name,username,role,active,created_at FROM users WHERE role IN ('supervisor','manager') ORDER BY role,name").all();
-  res.render('admin-staff',{title:'المشرفون',staff});
+  res.renderView('admin-staff',{title:'المشرفون',staff});
 }));
 app.post('/admin/staff/add',auth,roles('manager'),wrap(async (req,res)=>{
   try{
@@ -446,7 +458,7 @@ app.post('/admin/staff/:id/password',auth,roles('manager'),wrap(async (req,res)=
 }));
 
 app.get('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
-  res.render('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
+  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
 }));
 app.post('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
   await db.transaction(async ()=>{
@@ -459,7 +471,7 @@ app.post('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
 }));
 
 function safeRender(res,status,title,message){
-  try{ res.status(status).render('message',{title,message}); }
+  try{ res.renderView('message',{title,message},status); }
   catch(e){ console.error('render fallback:',e); res.status(status).type('text/plain; charset=utf-8').send(`${title}\n${message}`); }
 }
 app.use((req,res)=> safeRender(res,404,'غير موجود','الصفحة المطلوبة غير موجودة.'));
