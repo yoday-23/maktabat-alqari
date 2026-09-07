@@ -338,6 +338,16 @@ app.get('/leaderboard',auth,participantOnly,wrap(async (req,res)=>{
   res.renderView('leaderboard',{title:'المتميزون',rows});
 }));
 
+app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
+  const items=await db.prepare('SELECT * FROM suggestions WHERE active=1 ORDER BY section,category,sort_order').all();
+  const sections={};
+  for(const it of items){
+    sections[it.section]=sections[it.section]||{reading:[],listening:[]};
+    sections[it.section][it.category].push(it);
+  }
+  res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',sections});
+}));
+
 // Admin
 app.get('/admin',auth,adminOnly,wrap(async (req,res)=>{
   const [participants,pendingCount,rewardsCount,spentRow] = await Promise.all([
@@ -476,6 +486,44 @@ app.post('/admin/rewards/:id/update',auth,adminOnly,wrap(async (req,res)=>{
 app.post('/admin/rewards/:id/toggle',auth,adminOnly,wrap(async (req,res)=>{
   await db.prepare('UPDATE rewards SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?').run(Number(req.params.id));
   flash(req,'success','تم تحديث حالة المكافأة.'); res.redirect('/admin/rewards');
+}));
+
+app.get('/admin/suggestions',auth,adminOnly,wrap(async (req,res)=>{
+  const items=await db.prepare('SELECT * FROM suggestions ORDER BY section,category,sort_order').all();
+  const sections={};
+  for(const it of items){
+    sections[it.section]=sections[it.section]||{reading:[],listening:[]};
+    sections[it.section][it.category].push(it);
+  }
+  res.renderView('admin-suggestions',{title:'المقترحات',sections});
+}));
+app.post('/admin/suggestions/add',auth,adminOnly,wrap(async (req,res)=>{
+  try{
+    const title=(req.body.title||'').trim(), category=req.body.category;
+    if(!title||!['reading','listening'].includes(category)) throw new Error('أكمل العنوان ونوع المادة.');
+    await db.prepare('INSERT INTO suggestions(title,author,category,description,link,section,sort_order) VALUES(?,?,?,?,?,?,?)')
+      .run(title,(req.body.author||'').trim(),category,(req.body.description||'').trim(),(req.body.link||'').trim()||null,(req.body.section||'عام').trim(),Number(req.body.sort_order)||0);
+    flash(req,'success','تمت إضافة العنصر.');
+  }catch(e){flash(req,'error',e.message)}
+  res.redirect('/admin/suggestions');
+}));
+app.post('/admin/suggestions/:id/update',auth,adminOnly,wrap(async (req,res)=>{
+  try{
+    const title=(req.body.title||'').trim();
+    if(!title) throw new Error('العنوان مطلوب.');
+    await db.prepare('UPDATE suggestions SET title=?,author=?,description=?,link=?,section=? WHERE id=?')
+      .run(title,(req.body.author||'').trim(),(req.body.description||'').trim(),(req.body.link||'').trim()||null,(req.body.section||'عام').trim(),Number(req.params.id));
+    flash(req,'success','تم حفظ التعديل.');
+  }catch(e){flash(req,'error',e.message)}
+  res.redirect('/admin/suggestions');
+}));
+app.post('/admin/suggestions/:id/toggle',auth,adminOnly,wrap(async (req,res)=>{
+  await db.prepare('UPDATE suggestions SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?').run(Number(req.params.id));
+  flash(req,'success','تم تحديث الحالة.'); res.redirect('/admin/suggestions');
+}));
+app.post('/admin/suggestions/:id/delete',auth,adminOnly,wrap(async (req,res)=>{
+  await db.prepare('DELETE FROM suggestions WHERE id=?').run(Number(req.params.id));
+  flash(req,'success','تم حذف العنصر.'); res.redirect('/admin/suggestions');
 }));
 
 app.get('/admin/vouchers',auth,adminOnly,wrap(async (req,res)=>{
