@@ -1,0 +1,21 @@
+<%- include('partials/header') %>
+<div class="login-wrap">
+  <div class="login-card">
+    <div class="login-visual">
+      <div class="shelf">📚</div>
+      <h1>مكتبة القارئ</h1>
+      <p>اقرأ، اسمع، اجمع رصيدك، وارتقِ في مكتبتك.</p>
+    </div>
+    <div class="login-form">
+      <h2>تسجيل الدخول</h2>
+      <p class="muted">مرحبًا بعودتك إلى رحلتك القرائية.</p>
+      <% if(typeof error!=='undefined'){ %><div class="flash error"><%= error %></div><% } %>
+      <form method="post" action="/login">
+        <label>اسم المستخدم<input name="username" required autocomplete="username"></label>
+        <label>كلمة المرور<input name="password" type="password" required autocomplete="current-password"></label>
+        <button class="primary full">دخول المكتبة</button>
+      </form>
+    </div>
+  </div>
+</div>
+<%- include('partials/footer') %>

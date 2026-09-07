@@ -1,0 +1,11 @@
+const db = require('./db');
+const assert = require('assert');
+const ranks = db.prepare('SELECT * FROM ranks ORDER BY min_minutes').all();
+const weeks = db.prepare('SELECT COUNT(*) c FROM weekly_goals').get().c;
+const rewards = db.prepare('SELECT COUNT(*) c FROM rewards').get().c;
+const participant = db.prepare("SELECT p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.username='odai'").get();
+assert(ranks.length >= 5, 'Expected seeded ranks');
+assert.strictEqual(weeks, 20, 'Expected 20 weeks');
+assert(rewards >= 4, 'Expected rewards');
+assert(participant && participant.wallet_minutes >= 0 && participant.lifetime_minutes >= participant.wallet_minutes, 'Participant balances invalid');
+console.log('Smoke test passed: schema, seed data and balance invariants look valid.');

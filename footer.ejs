@@ -1,0 +1,26 @@
+  </main>
+</div>
+<script>
+(function(){
+  document.querySelectorAll('[data-confirm]').forEach(function(el){el.addEventListener('click',function(e){if(!confirm(el.dataset.confirm))e.preventDefault()})});
+
+  var root=document.documentElement;
+  var toggles=document.querySelectorAll('.theme-toggle');
+  function applyTheme(theme){
+    if(theme==='dark') root.dataset.theme='dark'; else delete root.dataset.theme;
+    toggles.forEach(function(btn){var dark=theme==='dark';var icon=btn.querySelector('.theme-icon');var label=btn.querySelector('.theme-label');if(icon)icon.textContent=dark?'☀':'☾';if(label)label.textContent=dark?'الوضع النهاري':'الوضع الداكن';btn.setAttribute('aria-pressed',dark?'true':'false')});
+    try{localStorage.setItem('reader-theme',theme)}catch(e){}
+  }
+  var initial=root.dataset.theme==='dark'?'dark':'light'; applyTheme(initial);
+  toggles.forEach(function(btn){btn.addEventListener('click',function(){applyTheme(root.dataset.theme==='dark'?'light':'dark')})});
+
+  var more=document.querySelector('.mobile-more');
+  var menu=document.querySelector('.mobile-more-menu');
+  if(more&&menu){more.addEventListener('click',function(){var open=!menu.hasAttribute('hidden');if(open){menu.setAttribute('hidden','');more.setAttribute('aria-expanded','false')}else{menu.removeAttribute('hidden');more.setAttribute('aria-expanded','true')}});document.addEventListener('click',function(e){if(!menu.hasAttribute('hidden')&&!menu.contains(e.target)&&!more.contains(e.target)){menu.setAttribute('hidden','');more.setAttribute('aria-expanded','false')}})}
+
+  var choices=document.querySelectorAll('.activity-choice');
+  var activity=document.getElementById('activity_type');
+  choices.forEach(function(btn){btn.addEventListener('click',function(){choices.forEach(function(x){x.classList.remove('active')});btn.classList.add('active');if(activity)activity.value=btn.dataset.activity})});
+})();
+</script>
+</body></html>

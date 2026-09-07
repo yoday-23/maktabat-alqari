@@ -1,0 +1,35 @@
+<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#17382c"><title><%= title %> — <%= programName %></title><link rel="stylesheet" href="/style.css"><script>(function(){try{var s=localStorage.getItem('reader-theme');var d=s?s==='dark':window.matchMedia&&window.matchMedia('(prefers-color-scheme: dark)').matches;if(d)document.documentElement.dataset.theme='dark'}catch(e){}})();</script></head><body>
+<div class="app-shell">
+  <% if (user) { %>
+  <aside class="sidebar">
+    <a class="brand" href="/"><span class="brand-mark">📚</span><span><b><%= programName %></b><small>رحلتك في القراءة والاستماع</small></span></a>
+    <nav>
+      <% if(user.role==='participant'){ %>
+        <a class="nav-home <%= path==='/dashboard'?'active':'' %>" href="/dashboard">⌂ <span>الرئيسية</span></a>
+        <a class="nav-week <%= path==='/week'?'active':'' %>" href="/week">📖 <span>هذا الأسبوع</span></a>
+        <a class="nav-rank <%= path==='/rank'?'active':'' %>" href="/rank">🏛️ <span>رتبتي</span></a>
+        <a class="nav-store <%= path==='/store'?'active':'' %>" href="/store">🛍️ <span>المتجر</span></a>
+        <a class="nav-vouchers <%= path==='/vouchers'?'active':'' %>" href="/vouchers">🎟️ <span>قسائمي</span></a>
+        <a class="nav-history <%= path==='/history'?'active':'' %>" href="/history">📜 <span>سجل مكتبتي</span></a>
+        <a class="nav-leaderboard <%= path==='/leaderboard'?'active':'' %>" href="/leaderboard">🏆 <span>المتميزون</span></a>
+        <button type="button" class="mobile-more" aria-expanded="false" aria-controls="mobile-more-menu">☰ <span>المزيد</span></button>
+      <% } else { %>
+        <a class="<%= path==='/admin'?'active':'' %>" href="/admin">📊 <span>لوحة التحكم</span></a>
+        <a href="/admin/participants">👥 <span>المشاركون</span></a>
+        <a href="/admin/approvals">⏳ <span>الإنجازات المعلقة</span></a>
+        <a href="/admin/weeks">📅 <span>الأسابيع</span></a>
+        <a href="/admin/ranks">🏛️ <span>الرتب</span></a>
+        <a href="/admin/rewards">🛍️ <span>المتجر</span></a>
+        <a href="/admin/vouchers">🎟️ <span>القسائم</span></a>
+        <a href="/admin/transactions">📜 <span>سجل المعاملات</span></a>
+        <% if(user.role==='manager'){ %><a href="/admin/staff">🛡️ <span>المشرفون</span></a><% } %>
+        <% if(user.role==='manager'){ %><a href="/admin/settings">⚙️ <span>الإعدادات</span></a><% } %>
+      <% } %>
+    </nav>
+    <% if(user.role==='participant'){ %><div id="mobile-more-menu" class="mobile-more-menu" hidden><a href="/rank">🏛️ رتبتي</a><a href="/history">📜 سجل مكتبتي</a><a href="/leaderboard">🏆 المتميزون</a><a href="/account">🔐 حسابي</a><form action="/logout" method="post"><button type="submit">↪ تسجيل الخروج</button></form></div><% } %>
+    <form class="sidebar-logout" action="/logout" method="post"><button class="ghost full">تسجيل الخروج</button></form>
+  </aside>
+  <% } %>
+  <main class="main <%= user?'':'auth-main' %>">
+    <% if(user){ %><div class="topbar"><div><small>مرحبًا،</small><strong><%= user.name %></strong></div><div class="top-actions"><span class="role"><%= user.role==='participant'?'مشارك':user.role==='supervisor'?'مشرف':'مدير' %></span><button type="button" class="theme-toggle" aria-label="تبديل الوضع" title="الوضع الليلي والنهاري"><span class="theme-icon">☾</span><span class="theme-label">الوضع الداكن</span></button></div></div><% } else { %><button type="button" class="theme-toggle theme-login" aria-label="تبديل الوضع"><span class="theme-icon">☾</span><span class="theme-label">الوضع الداكن</span></button><% } %>
+    <% if(flash){ %><div class="flash <%= flash.type %>"><%= flash.message %></div><% } %>

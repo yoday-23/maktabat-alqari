@@ -1,0 +1,4 @@
+<%- include('partials/header') %>
+<div class="page-head"><div><span class="eyebrow">الأمان</span><h1>حسابي</h1><p class="muted">غيّر كلمة مرورك من هنا. لا يمكن تعديل الرصيد من هذه الصفحة.</p></div></div>
+<section class="card narrow-card"><h2>تغيير كلمة المرور</h2><form method="post" action="/account/password"><label>كلمة المرور الحالية<input type="password" name="current_password" required autocomplete="current-password"></label><label>كلمة المرور الجديدة<input type="password" name="new_password" minlength="8" required autocomplete="new-password"></label><label>تأكيد كلمة المرور<input type="password" name="confirm_password" minlength="8" required autocomplete="new-password"></label><button class="primary full">حفظ كلمة المرور</button></form></section>
+<%- include('partials/footer') %>

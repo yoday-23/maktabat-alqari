@@ -1,0 +1,41 @@
+<%- include('partials/header') %>
+<% const readRemain=week?Math.max(0,week.reading_target-progress.reading):0; const listenRemain=week?Math.max(0,week.listening_target-progress.listening):0; const readEffective=week?progress.reading+pending.reading:0; const listenEffective=week?progress.listening+pending.listening:0; const weekDone=week&&readRemain===0&&listenRemain===0; const weekWaiting=week&&!weekDone&&readEffective>=week.reading_target&&listenEffective>=week.listening_target; const rankRemain=p.nextRank?Math.max(0,p.nextRank.min_minutes-p.lifetime_minutes):0; %>
+<section class="hero hero-dashboard"><div><span class="eyebrow">أهلًا بك في مكتبتك 👋🏻</span><h1><%= p.rank.icon %> <%= p.rank.name %></h1><p>كل دقيقة تضيفها تبني رحلتك وتفتح لك رتبة ومكافأة جديدة.</p><div class="hero-chips"><span>🔥 <%= p.lifetime_minutes.toLocaleString('ar-SA') %> دقيقة في رحلتك</span><span>🪙 <%= p.wallet_minutes.toLocaleString('ar-SA') %> دقيقة متاحة</span></div></div><div class="book-stack" aria-hidden="true">▰<br>▰<br>▰</div></section>
+
+<section class="next-step card accent-card">
+  <div class="next-step-icon"><%= !week?'📚':weekDone?(p.nextRank&&rankRemain<=100?'🏛️':'✅'):(readRemain>0?'📖':'🎧') %></div>
+  <div>
+    <span class="eyebrow">خطوتك التالية</span>
+    <% if(!week){ %><h2>استعد للأسبوع القادم</h2><p>لا يوجد أسبوع مفتوح حاليًا، واصل رحلتك من السجل والمتجر.</p>
+    <% } else if(weekWaiting){ %><h2>إنجازك مكتمل وبانتظار الاعتماد ⏳</h2><p>أرسلت ما يكفي لإكمال هدف الأسبوع. بعد اعتماد المشرف ستضاف الدقائق إلى رصيدك.</p><a class="primary inline" href="/week">راجع إنجازك</a>
+    <% } else if(!weekDone){ const readNeed=Math.max(0,week.reading_target-readEffective); const listenNeed=Math.max(0,week.listening_target-listenEffective); %><h2><%= readNeed>0?`باقي لك ${readNeed} دقيقة قراءة`:`باقي لك ${listenNeed} دقيقة استماع` %></h2><p>أكمل هدف الأسبوع، وبعد الاعتماد تضاف الدقائق مباشرة إلى رصيدك.</p><a class="primary inline" href="/week">سجّل إنجازك الآن</a>
+    <% } else if(p.nextRank && rankRemain<=100){ %><h2>اقتربت من <%= p.nextRank.name %></h2><p>باقي لك <b><%= rankRemain %></b> دقيقة فقط للوصول إلى رتبتك التالية.</p><a class="primary inline" href="/rank">شاهد رحلة الرتب</a>
+    <% } else if(rewardNow){ %><h2>رصيدك يكفي لمكافأة الآن ☕</h2><p>يمكنك الحصول على «<%= rewardNow.name %>» مقابل <%= rewardNow.price_minutes %> دقيقة دون أن تنخفض رتبتك.</p><a class="primary inline" href="/store">افتح المتجر</a>
+    <% } else { %><h2>أكملت هدف هذا الأسبوع 🎉</h2><p>ممتاز! تستطيع الاستمرار بدقائق إضافية أو استكشاف المكافآت القادمة.</p><a class="primary inline" href="/store">استكشف المتجر</a><% } %>
+  </div>
+</section>
+
+<div class="grid dashboard-main">
+  <section class="card weekly-focus">
+    <div class="section-title"><div><span class="eyebrow">الأهم الآن</span><h2>إنجازك هذا الأسبوع</h2></div><a href="/week">التفاصيل</a></div>
+    <% if(week){ %>
+      <div class="goal-modern"><div class="goal-head"><span>📖 القراءة</span><b><%= progress.reading %> / <%= week.reading_target %> دقيقة</b></div><div class="progress"><i style="width:<%= Math.min(100,Math.round(progress.reading/week.reading_target*100)) %>%"></i></div><small>معتمد: <%= progress.reading %> <% if(pending.reading){ %>• قيد المراجعة: <%= pending.reading %><% } %> — <%= readRemain===0?'تم إكمال الهدف ✓':`باقي ${readRemain} دقيقة معتمدة` %></small></div>
+      <div class="goal-modern"><div class="goal-head"><span>🎧 الاستماع</span><b><%= progress.listening %> / <%= week.listening_target %> دقيقة</b></div><div class="progress"><i style="width:<%= Math.min(100,Math.round(progress.listening/week.listening_target*100)) %>%"></i></div><small>معتمد: <%= progress.listening %> <% if(pending.listening){ %>• قيد المراجعة: <%= pending.listening %><% } %> — <%= listenRemain===0?'تم إكمال الهدف ✓':`باقي ${listenRemain} دقيقة معتمدة` %></small></div>
+      <a class="primary full center-link" href="/week"><%= weekDone?'إضافة إنجاز آخر':'سجّل إنجازك' %></a>
+    <% } else { %><p class="muted">لا يوجد أسبوع مفتوح حاليًا.</p><% } %>
+  </section>
+
+  <section class="card journey-card">
+    <div class="section-title"><div><span class="eyebrow">رحلتك</span><h2>تقدمك في المكتبة</h2></div><a href="/rank">كل الرتب</a></div>
+    <div class="journey-rank"><span class="rank-icon small"><%= p.rank.icon %></span><div><b><%= p.rank.name %></b><small><%= p.lifetime_minutes.toLocaleString('ar-SA') %> دقيقة معتمدة</small></div></div>
+    <% if(p.nextRank){ const range=p.nextRank.min_minutes-p.rank.min_minutes; const done=p.lifetime_minutes-p.rank.min_minutes; const pct=Math.max(0,Math.min(100,Math.round(done/range*100))); %><div class="progress large"><i style="width:<%= pct %>%"></i></div><p class="rank-message">باقي <b><%= rankRemain %></b> دقيقة للوصول إلى <%= p.nextRank.icon %> «<%= p.nextRank.name %>»</p><% } else { %><p class="rank-message">وصلت إلى أعلى رتبة في المكتبة 👑</p><% } %>
+    <div class="wallet-box"><span>رصيدك المتاح للمكافآت</span><strong><%= p.wallet_minutes.toLocaleString('ar-SA') %></strong><small>دقيقة</small><a href="/store">شاهد ماذا تستطيع استبداله ←</a></div>
+  </section>
+</div>
+
+<div class="grid two secondary-grid">
+  <section class="card"><div class="section-title"><h2>آخر النشاطات</h2><a href="/history">السجل كاملًا</a></div><div class="timeline"><% tx.slice(0,5).forEach(t=>{ %><div><span class="dot"></span><p><b><%= t.kind==='earn'?'+':t.kind==='spend'?'':'±' %><%= t.amount %> دقيقة</b><small><%= t.reason %></small></p></div><% }) %></div></section>
+  <section class="card"><div class="section-title"><h2>ملخص رحلتك</h2></div><div class="mini-journey"><div><span>📖</span><b><%= p.reading_minutes.toLocaleString('ar-SA') %></b><small>دقيقة قراءة</small></div><div><span>🎧</span><b><%= p.listening_minutes.toLocaleString('ar-SA') %></b><small>دقيقة استماع</small></div></div></section>
+</div>
+<% if(notifications.length){ %><section class="card notifications-card"><div class="section-title"><h2>إشعاراتك</h2></div><div class="notification-list"><% notifications.forEach(n=>{ %><div><b><%= n.title %></b><span><%= n.body %></span></div><% }) %></div></section><% } %>
+<%- include('partials/footer') %>
