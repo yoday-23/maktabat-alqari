@@ -81,7 +81,10 @@ app.use(async (req,res,next)=>{
   res.locals.user=req.session.user || null;
   res.locals.flash=req.session.flash || null;
   delete req.session.flash;
-  try { res.locals.programName = await setting('program_name','مكتبة القارئ'); }
+  try {
+    res.locals.programName = await setting('program_name','مكتبة القارئ');
+    res.locals.vouchersEnabled = (await setting('vouchers_enabled','1')) === '1';
+  }
   catch (e) { return next(e); }
   res.locals.path=req.path;
   next();
@@ -233,6 +236,7 @@ app.post('/store/:id/buy',auth,participantOnly,wrap(async (req,res)=>{
 }));
 
 app.get('/vouchers',auth,participantOnly,wrap(async (req,res)=>{
+  if(!res.locals.vouchersEnabled) return res.renderView('message',{title:'قسائمي',message:'هذه الميزة غير متاحة حاليًا.'});
   await expireVouchers();
   const vouchers=await db.prepare(`SELECT v.*,r.name reward_name,r.icon,r.description,p.price_minutes,p.purchased_at
     FROM vouchers v JOIN purchases p ON p.id=v.purchase_id JOIN rewards r ON r.id=p.reward_id
@@ -450,13 +454,14 @@ app.post('/admin/staff/:id/password',auth,roles('manager'),wrap(async (req,res)=
 }));
 
 app.get('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
-  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
+  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),vouchersEnabled:await setting('vouchers_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
 }));
 app.post('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
   await db.transaction(async ()=>{
     const up=(k,v)=> db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,v);
     await up('approval_required',req.body.approval_required?'1':'0');
     await up('leaderboard_enabled',req.body.leaderboard_enabled?'1':'0');
+    await up('vouchers_enabled',req.body.vouchers_enabled?'1':'0');
     await up('program_name',(req.body.program_name||'مكتبة القارئ').trim());
   })();
   flash(req,'success','تم حفظ الإعدادات.'); res.redirect('/admin/settings');
