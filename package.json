@@ -1,12 +1,12 @@
 {
   "name": "maktabat-alqari",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "commonjs",
+  "main": "src/server.js",
   "scripts": {
-    "start": "node src/seed.js && node src/server.js",
+    "start": "node src/server.js",
     "dev": "node --watch src/server.js",
-    "seed": "node src/seed.js",
     "test": "node src/smoke-test.js"
   },
   "dependencies": {
@@ -14,9 +14,10 @@
     "cookie-session": "^2.1.0",
     "ejs": "^3.1.10",
     "express": "^4.21.2",
-    "helmet": "^8.0.0"
+    "helmet": "^8.0.0",
+    "pg": "^8.13.1"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=18.0.0"
   }
 }
