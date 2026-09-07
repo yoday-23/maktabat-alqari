@@ -1,10 +1,25 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');
 const bcrypt = require('bcryptjs');
 const crypto = require('crypto');
 const helmet = require('helmet');
 const cookieSession = require('cookie-session');
 const db = require('./db');
+
+// يجبر أداة تتبع الملفات في Vercel (nft) على تضمين مجلدي views وpublic كاملين
+// داخل حزمة الدالة، لأنها لا تكتشف الملفات التي يفتحها محرك العرض EJS ديناميكيًا.
+(function bundleStaticDirs(){
+  for (const dir of [path.join(__dirname,'..','views'), path.join(__dirname,'..','public')]) {
+    try {
+      const entries = fs.readdirSync(dir, { recursive: true });
+      for (const entry of entries) {
+        const full = path.join(dir, entry);
+        try { if (fs.statSync(full).isFile()) fs.readFileSync(full); } catch (_) {}
+      }
+    } catch (_) {}
+  }
+})();
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
