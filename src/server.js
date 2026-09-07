@@ -132,6 +132,29 @@ async function participantSummary(id){
   return {...p,rank,nextRank};
 }
 
+async function getStreak(participantId){
+  const weeks = await db.prepare("SELECT id,reading_target,listening_target FROM weekly_goals WHERE ends_at<now() ORDER BY week_number DESC").all();
+  let streak=0;
+  for(const w of weeks){
+    if(!w.reading_target && !w.listening_target) continue;
+    const rows = await db.prepare(`SELECT activity_type,COALESCE(SUM(minutes),0) total FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND status='approved' GROUP BY activity_type`).all(participantId,w.id);
+    const reading = Number(rows.find(r=>r.activity_type==='reading')?.total||0);
+    const listening = Number(rows.find(r=>r.activity_type==='listening')?.total||0);
+    if(reading>=w.reading_target && listening>=w.listening_target) streak++; else break;
+  }
+  return streak;
+}
+const BADGE_DEFS=[
+  {id:'start',icon:'📚',name:'بداية الرحلة',desc:'أول 100 دقيقة في رحلتك',test:(p,streak)=>p.lifetime_minutes>=100},
+  {id:'streak5',icon:'🔥',name:'سلسلة 5 أسابيع',desc:'أكملت هدف 5 أسابيع متتالية',test:(p,streak)=>streak>=5},
+  {id:'reader500',icon:'📖',name:'قارئ نهم',desc:'500 دقيقة قراءة معتمدة',test:(p,streak)=>p.reading_minutes>=500},
+  {id:'listener500',icon:'🎧',name:'مستمع مثابر',desc:'500 دقيقة استماع معتمدة',test:(p,streak)=>p.listening_minutes>=500},
+  {id:'topRank',icon:'👑',name:'من أهل المكتبة',desc:'وصلت إلى أعلى رتبة',test:(p,streak)=>p.rank && p.rank.name==='من أهل المكتبة'},
+];
+function computeBadges(p,streak){
+  return BADGE_DEFS.map(b=>({icon:b.icon,name:b.name,desc:b.desc,earned:!!b.test(p,streak)}));
+}
+
 app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
   const p=await participantSummary(req.session.user.id);
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
@@ -149,7 +172,26 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
     ORDER BY r.price_minutes ASC LIMIT 1`).get(p.wallet_minutes,p.lifetime_minutes,p.id);
   const tx=await db.prepare('SELECT * FROM transactions WHERE participant_id=? ORDER BY id DESC LIMIT 7').all(p.id);
   const notifications=await db.prepare('SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 5').all(p.id);
-  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications});
+  const streak=await getStreak(p.id);
+  const badges=computeBadges(p,streak);
+  // احتفال عند الترقية: نبحث عن إشعار ترقية غير مقروء ونعلّمه كمقروء حتى لا يتكرر الاحتفال كل زيارة.
+  const promoNotif=await db.prepare("SELECT id FROM notifications WHERE user_id=? AND title LIKE '🎉%' AND read_at IS NULL ORDER BY id DESC LIMIT 1").get(p.id);
+  let celebratePromotion=false;
+  if(promoNotif){ celebratePromotion=true; await db.prepare('UPDATE notifications SET read_at=now() WHERE id=?').run(promoNotif.id); }
+  // احتفال عند إكمال هدف الأسبوع: مرة واحدة لكل أسبوع لكل جلسة دخول.
+  const weekDoneNow = week && progress.reading>=week.reading_target && progress.listening>=week.listening_target;
+  let celebrateWeek=false;
+  if(weekDoneNow){
+    req.session.celebratedWeeks = req.session.celebratedWeeks || [];
+    if(!req.session.celebratedWeeks.includes(week.id)){ celebrateWeek=true; req.session.celebratedWeeks.push(week.id); }
+  }
+  // تذكير لو اقترب انتهاء الأسبوع ولم يكتمل الهدف بعد.
+  let deadlineReminder=null;
+  if(week && !weekDoneNow){
+    const hoursLeft=(new Date(week.ends_at)-new Date())/36e5;
+    if(hoursLeft>0 && hoursLeft<=48) deadlineReminder=`⏰ يتبقى أقل من ${Math.max(1,Math.round(hoursLeft))} ساعة لإكمال هدف هذا الأسبوع.`;
+  }
+  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder});
 }));
 
 app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
@@ -211,7 +253,9 @@ const approveLog = db.transaction(async (logId, reviewerId, note='')=>{
 app.get('/rank',auth,participantOnly,wrap(async (req,res)=>{
   const p=await participantSummary(req.session.user.id);
   const ranks=await db.prepare('SELECT * FROM ranks WHERE active=1 ORDER BY min_minutes').all();
-  res.renderView('rank',{title:'رتبتي',p,ranks});
+  const streak=await getStreak(p.id);
+  const badges=computeBadges(p,streak);
+  res.renderView('rank',{title:'رتبتي',p,ranks,streak,badges});
 }));
 
 app.get('/store',auth,participantOnly,wrap(async (req,res)=>{
