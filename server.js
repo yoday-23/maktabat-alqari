@@ -8,6 +8,18 @@ const ejs = require('ejs');
 const db = require('./db');
 const viewTemplates = require('./views-data');
 
+const AR_MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function fmtDate(d){
+  if(!d) return '';
+  const date=(d instanceof Date)?d:new Date(d);
+  if(isNaN(date.getTime())) return '';
+  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Riyadh',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).formatToParts(date);
+  const get=t=>(parts.find(p=>p.type===t)||{}).value;
+  const day=get('day'), month=Number(get('month')), year=get('year'), hour=get('hour'), minute=get('minute'), dayPeriod=get('dayPeriod');
+  const ampm = dayPeriod==='AM'?'ص':'م';
+  return `${day} ${AR_MONTHS[month-1]} ${year} – ${hour}:${minute} ${ampm}`;
+}
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -44,6 +56,24 @@ app.use(express.urlencoded({extended:true}));
 app.use(express.json());
 const styleCss = require('./style-data');
 app.get('/style.css',(req,res)=> res.type('text/css; charset=utf-8').send(styleCss));
+const icons = require('./icons-data');
+const iconBuf = {
+  apple: Buffer.from(icons.apple,'base64'),
+  i192: Buffer.from(icons.i192,'base64'),
+  fav32: Buffer.from(icons.fav32,'base64'),
+  i1024: Buffer.from(icons.i1024,'base64'),
+};
+app.get('/apple-touch-icon.png',(req,res)=> res.type('image/png').send(iconBuf.apple));
+app.get('/apple-touch-icon-precomposed.png',(req,res)=> res.type('image/png').send(iconBuf.apple));
+app.get('/icon-192.png',(req,res)=> res.type('image/png').send(iconBuf.i192));
+app.get('/icon-512.png',(req,res)=> res.type('image/png').send(iconBuf.i1024));
+app.get('/favicon.png',(req,res)=> res.type('image/png').send(iconBuf.fav32));
+app.get('/favicon.ico',(req,res)=> res.type('image/png').send(iconBuf.fav32));
+app.get('/site.webmanifest',(req,res)=> res.type('application/manifest+json').send(JSON.stringify({
+  name:'مكتبة القارئ', short_name:'مكتبة القارئ', start_url:'/', display:'standalone',
+  background_color:'#172542', theme_color:'#172542',
+  icons:[{src:'/icon-192.png',sizes:'192x192',type:'image/png'},{src:'/icon-512.png',sizes:'512x512',type:'image/png'}]
+})));
 app.use(express.static(path.join(__dirname,'..','public')));
 app.use(cookieSession({
   name:'readerlib',
@@ -54,16 +84,8 @@ app.use(cookieSession({
   maxAge:1000*60*60*24*7
 }));
 
-// حماية بسيطة لطلبات التعديل القادمة من المتصفح: يجب أن يكون المصدر هو نفس المضيف.
-app.use((req,res,next)=>{
-  if (!['POST','PUT','PATCH','DELETE'].includes(req.method)) return next();
-  const origin=req.get('origin');
-  if (!origin) return next();
-  try {
-    if (new URL(origin).host !== req.get('host')) return res.status(403).send('طلب غير مسموح.');
-  } catch (_) { return res.status(403).send('طلب غير مسموح.'); }
-  next();
-});
+// (تمت إزالة فحص Origin/Host الإضافي: كان يرفض تسجيل الدخول بالخطأ بسبب طريقة توجيه
+// النطاقات في Vercel. الحماية الأساسية من CSRF متوفرة أصلًا عبر sameSite:'lax' في الجلسة.)
 
 async function setting(key, fallback='') {
   const row = await db.prepare('SELECT value FROM settings WHERE key=?').get(key);
@@ -81,7 +103,7 @@ async function expireVouchers(){
   await db.prepare("UPDATE vouchers SET status='expired' WHERE status='unused' AND expires_at IS NOT NULL AND expires_at < now()").run();
 }
 function auth(req,res,next){ if(!req.session.user) return res.redirect('/login'); next(); }
-function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session.user?.role) ? next() : res.renderView('message',{title:'غير مصرح',message:'لا تملك صلاحية الوصول إلى هذه الصفحة.'},403); }
+function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session.user?.role) ? next() : res.renderView('message',{title:'غير مصرح',message:req.session.user?.role==='participant'?'هذا الحساب مخصص للمشاركين، ولا يملك صلاحية دخول لوحة الإدارة.':'لا تملك صلاحية الوصول إلى هذه الصفحة.'},403); }
 function participantOnly(req,res,next){ return roles('participant')(req,res,next); }
 function adminOnly(req,res,next){ return roles('supervisor','manager')(req,res,next); }
 
@@ -89,22 +111,34 @@ app.use(async (req,res,next)=>{
   res.locals.user=req.session.user || null;
   res.locals.flash=req.session.flash || null;
   delete req.session.flash;
-  try { res.locals.programName = await setting('program_name','مكتبة القارئ'); }
+  try {
+    res.locals.programName = await setting('program_name','مكتبة القارئ');
+    res.locals.vouchersEnabled = (await setting('vouchers_enabled','1')) === '1';
+  }
   catch (e) { return next(e); }
   res.locals.path=req.path;
+  res.locals.origin=`${req.protocol}://${req.get('host')}`;
+  res.locals.fmtDate=fmtDate;
+  const ALLOWED_WHILE_FORCED=new Set(['/account','/account/password','/logout']);
+  if(req.session.user?.mustChangePassword && !ALLOWED_WHILE_FORCED.has(req.path)){
+    return res.redirect('/account');
+  }
   next();
 });
 
 app.get('/',(req,res)=> res.redirect(req.session.user ? (req.session.user.role==='participant'?'/dashboard':'/admin') : '/login'));
-app.get('/login',(req,res)=> res.renderView('login',{title:'تسجيل الدخول'}));
+app.get('/login',(req,res)=>{
+  if(req.session.user) return res.redirect(req.session.user.role==='participant'?'/dashboard':'/admin');
+  res.renderView('login',{title:'تسجيل الدخول'});
+});
 app.post('/login', wrap(async (req,res)=>{
   const {username,password}=req.body;
   const user=await db.prepare('SELECT * FROM users WHERE username=? AND active=1').get((username||'').trim());
   if(!user || !bcrypt.compareSync(password||'',user.password_hash)){
     return res.renderView('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'},401);
   }
-  req.session.user={id:user.id,name:user.name,role:user.role};
-  res.redirect(user.role==='participant'?'/dashboard':'/admin');
+  req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password};
+  res.redirect(user.must_change_password?'/account':(user.role==='participant'?'/dashboard':'/admin'));
 }));
 app.post('/logout',(req,res)=>{ req.session=null; res.redirect('/login'); });
 
@@ -117,6 +151,29 @@ async function participantSummary(id){
   if(!p) return null;
   const rank=await getRank(p.lifetime_minutes), nextRank=await getNextRank(p.lifetime_minutes);
   return {...p,rank,nextRank};
+}
+
+async function getStreak(participantId){
+  const weeks = await db.prepare("SELECT id,reading_target,listening_target FROM weekly_goals WHERE ends_at<now() ORDER BY week_number DESC").all();
+  let streak=0;
+  for(const w of weeks){
+    if(!w.reading_target && !w.listening_target) continue;
+    const rows = await db.prepare(`SELECT activity_type,COALESCE(SUM(minutes),0) total FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND status='approved' GROUP BY activity_type`).all(participantId,w.id);
+    const reading = Number(rows.find(r=>r.activity_type==='reading')?.total||0);
+    const listening = Number(rows.find(r=>r.activity_type==='listening')?.total||0);
+    if(reading>=w.reading_target && listening>=w.listening_target) streak++; else break;
+  }
+  return streak;
+}
+const BADGE_DEFS=[
+  {id:'start',icon:'📚',name:'بداية الرحلة',desc:'أول 100 دقيقة في رحلتك',test:(p,streak)=>p.lifetime_minutes>=100,remain:(p,streak)=>Math.max(0,100-p.lifetime_minutes)+' دقيقة متبقية'},
+  {id:'streak5',icon:'🔥',name:'سلسلة 5 أسابيع',desc:'أكملت هدف 5 أسابيع متتالية',test:(p,streak)=>streak>=5,remain:(p,streak)=>Math.max(0,5-streak)+' أسابيع متبقية'},
+  {id:'reader500',icon:'📖',name:'قارئ نهم',desc:'500 دقيقة قراءة معتمدة',test:(p,streak)=>p.reading_minutes>=500,remain:(p,streak)=>Math.max(0,500-p.reading_minutes)+' دقيقة متبقية'},
+  {id:'listener500',icon:'🎧',name:'مستمع مثابر',desc:'500 دقيقة استماع معتمدة',test:(p,streak)=>p.listening_minutes>=500,remain:(p,streak)=>Math.max(0,500-p.listening_minutes)+' دقيقة متبقية'},
+  {id:'topRank',icon:'👑',name:'من أهل المكتبة',desc:'وصلت إلى أعلى رتبة',test:(p,streak)=>p.rank && p.rank.name==='من أهل المكتبة',remain:()=>'واصل رحلتك للوصول'},
+];
+function computeBadges(p,streak){
+  return BADGE_DEFS.map(b=>{ const earned=!!b.test(p,streak); return {icon:b.icon,name:b.name,desc:b.desc,earned,remain:earned?null:b.remain(p,streak)}; });
 }
 
 app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
@@ -136,7 +193,27 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
     ORDER BY r.price_minutes ASC LIMIT 1`).get(p.wallet_minutes,p.lifetime_minutes,p.id);
   const tx=await db.prepare('SELECT * FROM transactions WHERE participant_id=? ORDER BY id DESC LIMIT 7').all(p.id);
   const notifications=await db.prepare('SELECT * FROM notifications WHERE user_id=? ORDER BY id DESC LIMIT 5').all(p.id);
-  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications});
+  const streak=await getStreak(p.id);
+  const badges=computeBadges(p,streak);
+  // احتفال عند الترقية: نبحث عن إشعار ترقية غير مقروء ونعلّمه كمقروء حتى لا يتكرر الاحتفال كل زيارة.
+  const promoNotif=await db.prepare("SELECT id FROM notifications WHERE user_id=? AND title LIKE '🎉%' AND read_at IS NULL ORDER BY id DESC LIMIT 1").get(p.id);
+  let celebratePromotion=false;
+  if(promoNotif){ celebratePromotion=true; await db.prepare('UPDATE notifications SET read_at=now() WHERE id=?').run(promoNotif.id); }
+  // احتفال عند إكمال هدف الأسبوع: مرة واحدة لكل أسبوع لكل جلسة دخول.
+  const weekDoneNow = week && progress.reading>=week.reading_target && progress.listening>=week.listening_target;
+  let celebrateWeek=false;
+  if(weekDoneNow){
+    req.session.celebratedWeeks = req.session.celebratedWeeks || [];
+    if(!req.session.celebratedWeeks.includes(week.id)){ celebrateWeek=true; req.session.celebratedWeeks.push(week.id); }
+  }
+  // تذكير لو اقترب انتهاء الأسبوع ولم يكتمل الهدف بعد.
+  let deadlineReminder=null;
+  if(week && !weekDoneNow){
+    const hoursLeft=(new Date(week.ends_at)-new Date())/36e5;
+    if(hoursLeft>0 && hoursLeft<=48) deadlineReminder=`⏰ يتبقى أقل من ${Math.max(1,Math.round(hoursLeft))} ساعة لإكمال هدف هذا الأسبوع.`;
+  }
+  const myRankRow=await db.prepare(`SELECT COUNT(*)+1 c FROM participants p2 JOIN users u2 ON u2.id=p2.user_id WHERE u2.active=1 AND p2.lifetime_minutes>?`).get(p.lifetime_minutes);
+  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c)});
 }));
 
 app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
@@ -147,21 +224,35 @@ app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
 app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
   if(!week){flash(req,'error','لا يوجد أسبوع مفتوح حاليًا.'); return res.redirect('/week');}
-  const type=req.body.activity_type;
-  const minutes=Number(req.body.minutes);
   const notes=(req.body.notes||'').trim();
-  if(!['reading','listening'].includes(type)||!Number.isInteger(minutes)||minutes<1||minutes>1440){flash(req,'error','تحقق من نوع النشاط وعدد الدقائق.');return res.redirect('/week');}
-  const duplicate=await db.prepare(`SELECT id FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND activity_type=? AND minutes=? AND status IN ('pending','approved')`).get(req.session.user.id,week.id,type,minutes);
-  if(duplicate){flash(req,'error','يوجد إنجاز مماثل مسجل لهذا الأسبوع بالفعل.');return res.redirect('/week');}
-  const approvalRequired=(await setting('approval_required','1'))==='1';
-  if(approvalRequired){
-    await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status) VALUES(?,?,?,?,?,?)').run(req.session.user.id,week.id,type,minutes,notes,'pending');
-    flash(req,'success','تم إرسال الإنجاز وبانتظار اعتماد المشرف.');
-  } else {
-    const result=await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status,reviewed_at) VALUES(?,?,?,?,?,?,now())').run(req.session.user.id,week.id,type,minutes,notes,'approved');
-    await approveLog(result.lastInsertRowid,null,'اعتماد تلقائي');
-    flash(req,'success','تم تسجيل الإنجاز واعتماده تلقائيًا.');
+  const entries=[];
+  for(const type of ['reading','listening']){
+    const raw=req.body[`${type}_minutes`];
+    if(raw===undefined||raw==='') continue;
+    const minutes=Number(raw);
+    if(!Number.isInteger(minutes)||minutes<1||minutes>1440){flash(req,'error','تحقق من عدد الدقائق (بين 1 و1440).');return res.redirect('/week');}
+    entries.push({type,minutes});
   }
+  if(!entries.length){flash(req,'error','أدخل دقائق القراءة أو الاستماع (أو كلاهما).');return res.redirect('/week');}
+  for(const {type,minutes} of entries){
+    const duplicate=await db.prepare(`SELECT id FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND activity_type=? AND minutes=? AND status IN ('pending','approved')`).get(req.session.user.id,week.id,type,minutes);
+    if(duplicate){flash(req,'error',`يوجد إنجاز ${type==='reading'?'قراءة':'استماع'} مماثل مسجل لهذا الأسبوع بالفعل.`);return res.redirect('/week');}
+  }
+  const approvalRequired=(await setting('approval_required','1'))==='1';
+  for(const {type,minutes} of entries){
+    if(approvalRequired){
+      await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status) VALUES(?,?,?,?,?,?)').run(req.session.user.id,week.id,type,minutes,notes,'pending');
+    } else {
+      const result=await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status,reviewed_at) VALUES(?,?,?,?,?,?,now())').run(req.session.user.id,week.id,type,minutes,notes,'approved');
+      await approveLog(result.lastInsertRowid,null,'اعتماد تلقائي');
+    }
+  }
+  flash(req,'success',approvalRequired?'تم إرسال إنجازك وبانتظار اعتماد المشرف.':'تم تسجيل إنجازك واعتماده تلقائيًا.');
+  res.redirect('/week');
+}));
+app.post('/week/logs/:id/delete',auth,participantOnly,wrap(async (req,res)=>{
+  const r=await db.prepare("DELETE FROM activity_logs WHERE id=? AND participant_id=? AND status='pending'").run(Number(req.params.id),req.session.user.id);
+  flash(req,r.changes?'success':'error',r.changes?'تم حذف الإنجاز.':'لا يمكن حذف هذا الإنجاز (قد يكون معتمدًا أو مرفوضًا بالفعل).');
   res.redirect('/week');
 }));
 
@@ -189,7 +280,9 @@ const approveLog = db.transaction(async (logId, reviewerId, note='')=>{
 app.get('/rank',auth,participantOnly,wrap(async (req,res)=>{
   const p=await participantSummary(req.session.user.id);
   const ranks=await db.prepare('SELECT * FROM ranks WHERE active=1 ORDER BY min_minutes').all();
-  res.renderView('rank',{title:'رتبتي',p,ranks});
+  const streak=await getStreak(p.id);
+  const badges=computeBadges(p,streak);
+  res.renderView('rank',{title:'رتبتي',p,ranks,streak,badges});
 }));
 
 app.get('/store',auth,participantOnly,wrap(async (req,res)=>{
@@ -241,6 +334,7 @@ app.post('/store/:id/buy',auth,participantOnly,wrap(async (req,res)=>{
 }));
 
 app.get('/vouchers',auth,participantOnly,wrap(async (req,res)=>{
+  if(!res.locals.vouchersEnabled) return res.renderView('message',{title:'قسائمي',message:'هذه الميزة غير متاحة حاليًا.'});
   await expireVouchers();
   const vouchers=await db.prepare(`SELECT v.*,r.name reward_name,r.icon,r.description,p.price_minutes,p.purchased_at
     FROM vouchers v JOIN purchases p ON p.id=v.purchase_id JOIN rewards r ON r.id=p.reward_id
@@ -255,7 +349,8 @@ app.post('/account/password',auth,participantOnly,wrap(async (req,res)=>{
   if(!bcrypt.compareSync(current,user.password_hash)){flash(req,'error','كلمة المرور الحالية غير صحيحة.');return res.redirect('/account');}
   if(next.length<8){flash(req,'error','كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل.');return res.redirect('/account');}
   if(next!==confirm){flash(req,'error','تأكيد كلمة المرور غير مطابق.');return res.redirect('/account');}
-  await db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(bcrypt.hashSync(next,10),user.id);
+  await db.prepare('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?').run(bcrypt.hashSync(next,10),user.id);
+  req.session.user.mustChangePassword=false;
   flash(req,'success','تم تغيير كلمة المرور.'); res.redirect('/account');
 }));
 
@@ -266,8 +361,15 @@ app.get('/history',auth,participantOnly,wrap(async (req,res)=>{
 
 app.get('/leaderboard',auth,participantOnly,wrap(async (req,res)=>{
   if((await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
-  const rows=await db.prepare(`SELECT u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 20`).all();
-  res.renderView('leaderboard',{title:'المتميزون',rows});
+  const rows=await db.prepare(`SELECT u.id user_id,u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 30`).all();
+  const myIndex=rows.findIndex(r=>r.user_id===req.session.user.id);
+  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:myIndex>=0?myIndex+1:null,myUserId:req.session.user.id});
+}));
+
+app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
+  const items=await db.prepare('SELECT * FROM suggestions WHERE active=1 ORDER BY section,category,sort_order').all();
+  const sectionNames=[...new Set(items.map(i=>i.section))];
+  res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
 }));
 
 // Admin
@@ -295,6 +397,18 @@ app.get('/admin/approvals',auth,adminOnly,wrap(async (req,res)=>{
 app.post('/admin/approvals/:id/approve',auth,adminOnly,wrap(async (req,res)=>{
   try{ await approveLog(Number(req.params.id),req.session.user.id,req.body.note||''); flash(req,'success','تم اعتماد الإنجاز وإضافة الدقائق.'); }
   catch(e){ flash(req,'error',e.message); }
+  res.redirect('/admin/approvals');
+}));
+app.post('/admin/approvals/bulk-approve',auth,adminOnly,wrap(async (req,res)=>{
+  let ids=req.body.ids||[];
+  if(!Array.isArray(ids)) ids=[ids];
+  ids=ids.map(Number).filter(Boolean);
+  let ok=0, failed=0;
+  for(const id of ids){
+    try{ await approveLog(id,req.session.user.id,'اعتماد جماعي'); ok++; }
+    catch(e){ failed++; }
+  }
+  flash(req,failed?'error':'success',`تم اعتماد ${ok} إنجاز${failed?`، وتعذر اعتماد ${failed}`:''}.`);
   res.redirect('/admin/approvals');
 }));
 app.post('/admin/approvals/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
@@ -340,6 +454,14 @@ app.post('/admin/participants/:id/update',auth,adminOnly,wrap(async (req,res)=>{
     }
     flash(req,'success','تم تحديث بيانات المشارك.');
   }catch(e){flash(req,'error',/unique/i.test(e.message)?'اسم المستخدم مستخدم مسبقًا.':e.message)}
+  res.redirect('/admin/participants');
+}));
+app.post('/admin/participants/:id/reset-password',auth,adminOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const temp=crypto.randomBytes(5).toString('base64').replace(/[^a-zA-Z0-9]/g,'').slice(0,8) || 'Reset1234';
+  const r=await db.prepare("UPDATE users SET password_hash=?,must_change_password=1 WHERE id=? AND role='participant'").run(bcrypt.hashSync(temp,10),id);
+  if(r.changes) flash(req,'success',`تم إنشاء رمز مؤقت: ${temp} — سلّمه للمشارك، وسيُطلب منه تغييره عند أول دخول. لن يظهر هذا الرمز مرة أخرى.`);
+  else flash(req,'error','تعذر إنشاء الرمز.');
   res.redirect('/admin/participants');
 }));
 app.post('/admin/participants/:id/adjust',auth,adminOnly,wrap(async (req,res)=>{
@@ -410,6 +532,44 @@ app.post('/admin/rewards/:id/toggle',auth,adminOnly,wrap(async (req,res)=>{
   flash(req,'success','تم تحديث حالة المكافأة.'); res.redirect('/admin/rewards');
 }));
 
+app.get('/admin/suggestions',auth,adminOnly,wrap(async (req,res)=>{
+  const items=await db.prepare('SELECT * FROM suggestions ORDER BY section,category,sort_order').all();
+  const sections={};
+  for(const it of items){
+    sections[it.section]=sections[it.section]||{reading:[],listening:[]};
+    sections[it.section][it.category].push(it);
+  }
+  res.renderView('admin-suggestions',{title:'المقترحات',sections});
+}));
+app.post('/admin/suggestions/add',auth,adminOnly,wrap(async (req,res)=>{
+  try{
+    const title=(req.body.title||'').trim(), category=req.body.category;
+    if(!title||!['reading','listening'].includes(category)) throw new Error('أكمل العنوان ونوع المادة.');
+    await db.prepare('INSERT INTO suggestions(title,author,category,description,link,section,sort_order) VALUES(?,?,?,?,?,?,?)')
+      .run(title,(req.body.author||'').trim(),category,(req.body.description||'').trim(),(req.body.link||'').trim()||null,(req.body.section||'عام').trim(),Number(req.body.sort_order)||0);
+    flash(req,'success','تمت إضافة العنصر.');
+  }catch(e){flash(req,'error',e.message)}
+  res.redirect('/admin/suggestions');
+}));
+app.post('/admin/suggestions/:id/update',auth,adminOnly,wrap(async (req,res)=>{
+  try{
+    const title=(req.body.title||'').trim();
+    if(!title) throw new Error('العنوان مطلوب.');
+    await db.prepare('UPDATE suggestions SET title=?,author=?,description=?,link=?,section=? WHERE id=?')
+      .run(title,(req.body.author||'').trim(),(req.body.description||'').trim(),(req.body.link||'').trim()||null,(req.body.section||'عام').trim(),Number(req.params.id));
+    flash(req,'success','تم حفظ التعديل.');
+  }catch(e){flash(req,'error',e.message)}
+  res.redirect('/admin/suggestions');
+}));
+app.post('/admin/suggestions/:id/toggle',auth,adminOnly,wrap(async (req,res)=>{
+  await db.prepare('UPDATE suggestions SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=?').run(Number(req.params.id));
+  flash(req,'success','تم تحديث الحالة.'); res.redirect('/admin/suggestions');
+}));
+app.post('/admin/suggestions/:id/delete',auth,adminOnly,wrap(async (req,res)=>{
+  await db.prepare('DELETE FROM suggestions WHERE id=?').run(Number(req.params.id));
+  flash(req,'success','تم حذف العنصر.'); res.redirect('/admin/suggestions');
+}));
+
 app.get('/admin/vouchers',auth,adminOnly,wrap(async (req,res)=>{
   await expireVouchers();
   const vouchers=await db.prepare(`SELECT v.*,u.name participant_name,r.name reward_name,r.icon FROM vouchers v JOIN purchases p ON p.id=v.purchase_id JOIN users u ON u.id=p.participant_id JOIN rewards r ON r.id=p.reward_id ORDER BY v.id DESC`).all();
@@ -458,13 +618,14 @@ app.post('/admin/staff/:id/password',auth,roles('manager'),wrap(async (req,res)=
 }));
 
 app.get('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
-  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
+  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),vouchersEnabled:await setting('vouchers_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
 }));
 app.post('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
   await db.transaction(async ()=>{
     const up=(k,v)=> db.prepare('INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(k,v);
     await up('approval_required',req.body.approval_required?'1':'0');
     await up('leaderboard_enabled',req.body.leaderboard_enabled?'1':'0');
+    await up('vouchers_enabled',req.body.vouchers_enabled?'1':'0');
     await up('program_name',(req.body.program_name||'مكتبة القارئ').trim());
   })();
   flash(req,'success','تم حفظ الإعدادات.'); res.redirect('/admin/settings');
