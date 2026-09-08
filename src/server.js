@@ -212,7 +212,8 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
     const hoursLeft=(new Date(week.ends_at)-new Date())/36e5;
     if(hoursLeft>0 && hoursLeft<=48) deadlineReminder=`⏰ يتبقى أقل من ${Math.max(1,Math.round(hoursLeft))} ساعة لإكمال هدف هذا الأسبوع.`;
   }
-  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder});
+  const myRankRow=await db.prepare(`SELECT COUNT(*)+1 c FROM participants p2 JOIN users u2 ON u2.id=p2.user_id WHERE u2.active=1 AND p2.lifetime_minutes>?`).get(p.lifetime_minutes);
+  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c)});
 }));
 
 app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
@@ -247,6 +248,11 @@ app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
     }
   }
   flash(req,'success',approvalRequired?'تم إرسال إنجازك وبانتظار اعتماد المشرف.':'تم تسجيل إنجازك واعتماده تلقائيًا.');
+  res.redirect('/week');
+}));
+app.post('/week/logs/:id/delete',auth,participantOnly,wrap(async (req,res)=>{
+  const r=await db.prepare("DELETE FROM activity_logs WHERE id=? AND participant_id=? AND status='pending'").run(Number(req.params.id),req.session.user.id);
+  flash(req,r.changes?'success':'error',r.changes?'تم حذف الإنجاز.':'لا يمكن حذف هذا الإنجاز (قد يكون معتمدًا أو مرفوضًا بالفعل).');
   res.redirect('/week');
 }));
 
@@ -355,8 +361,9 @@ app.get('/history',auth,participantOnly,wrap(async (req,res)=>{
 
 app.get('/leaderboard',auth,participantOnly,wrap(async (req,res)=>{
   if((await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
-  const rows=await db.prepare(`SELECT u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 20`).all();
-  res.renderView('leaderboard',{title:'المتميزون',rows});
+  const rows=await db.prepare(`SELECT u.id user_id,u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 30`).all();
+  const myIndex=rows.findIndex(r=>r.user_id===req.session.user.id);
+  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:myIndex>=0?myIndex+1:null,myUserId:req.session.user.id});
 }));
 
 app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
