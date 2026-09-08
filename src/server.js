@@ -8,6 +8,18 @@ const ejs = require('ejs');
 const db = require('./db');
 const viewTemplates = require('./views-data');
 
+const AR_MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
+function fmtDate(d){
+  if(!d) return '';
+  const date=(d instanceof Date)?d:new Date(d);
+  if(isNaN(date.getTime())) return '';
+  const parts=new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Riyadh',year:'numeric',month:'numeric',day:'numeric',hour:'numeric',minute:'2-digit',hour12:true}).formatToParts(date);
+  const get=t=>(parts.find(p=>p.type===t)||{}).value;
+  const day=get('day'), month=Number(get('month')), year=get('year'), hour=get('hour'), minute=get('minute'), dayPeriod=get('dayPeriod');
+  const ampm = dayPeriod==='AM'?'ص':'م';
+  return `${day} ${AR_MONTHS[month-1]} ${year} – ${hour}:${minute} ${ampm}`;
+}
+
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
@@ -106,19 +118,27 @@ app.use(async (req,res,next)=>{
   catch (e) { return next(e); }
   res.locals.path=req.path;
   res.locals.origin=`${req.protocol}://${req.get('host')}`;
+  res.locals.fmtDate=fmtDate;
+  const ALLOWED_WHILE_FORCED=new Set(['/account','/account/password','/logout']);
+  if(req.session.user?.mustChangePassword && !ALLOWED_WHILE_FORCED.has(req.path)){
+    return res.redirect('/account');
+  }
   next();
 });
 
 app.get('/',(req,res)=> res.redirect(req.session.user ? (req.session.user.role==='participant'?'/dashboard':'/admin') : '/login'));
-app.get('/login',(req,res)=> res.renderView('login',{title:'تسجيل الدخول'}));
+app.get('/login',(req,res)=>{
+  if(req.session.user) return res.redirect(req.session.user.role==='participant'?'/dashboard':'/admin');
+  res.renderView('login',{title:'تسجيل الدخول'});
+});
 app.post('/login', wrap(async (req,res)=>{
   const {username,password}=req.body;
   const user=await db.prepare('SELECT * FROM users WHERE username=? AND active=1').get((username||'').trim());
   if(!user || !bcrypt.compareSync(password||'',user.password_hash)){
     return res.renderView('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'},401);
   }
-  req.session.user={id:user.id,name:user.name,role:user.role};
-  res.redirect(user.role==='participant'?'/dashboard':'/admin');
+  req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password};
+  res.redirect(user.must_change_password?'/account':(user.role==='participant'?'/dashboard':'/admin'));
 }));
 app.post('/logout',(req,res)=>{ req.session=null; res.redirect('/login'); });
 
@@ -323,7 +343,8 @@ app.post('/account/password',auth,participantOnly,wrap(async (req,res)=>{
   if(!bcrypt.compareSync(current,user.password_hash)){flash(req,'error','كلمة المرور الحالية غير صحيحة.');return res.redirect('/account');}
   if(next.length<8){flash(req,'error','كلمة المرور الجديدة يجب أن تكون 8 أحرف على الأقل.');return res.redirect('/account');}
   if(next!==confirm){flash(req,'error','تأكيد كلمة المرور غير مطابق.');return res.redirect('/account');}
-  await db.prepare('UPDATE users SET password_hash=? WHERE id=?').run(bcrypt.hashSync(next,10),user.id);
+  await db.prepare('UPDATE users SET password_hash=?,must_change_password=0 WHERE id=?').run(bcrypt.hashSync(next,10),user.id);
+  req.session.user.mustChangePassword=false;
   flash(req,'success','تم تغيير كلمة المرور.'); res.redirect('/account');
 }));
 
@@ -340,12 +361,8 @@ app.get('/leaderboard',auth,participantOnly,wrap(async (req,res)=>{
 
 app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   const items=await db.prepare('SELECT * FROM suggestions WHERE active=1 ORDER BY section,category,sort_order').all();
-  const sections={};
-  for(const it of items){
-    sections[it.section]=sections[it.section]||{reading:[],listening:[]};
-    sections[it.section][it.category].push(it);
-  }
-  res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',sections});
+  const sectionNames=[...new Set(items.map(i=>i.section))];
+  res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
 }));
 
 // Admin
@@ -418,6 +435,14 @@ app.post('/admin/participants/:id/update',auth,adminOnly,wrap(async (req,res)=>{
     }
     flash(req,'success','تم تحديث بيانات المشارك.');
   }catch(e){flash(req,'error',/unique/i.test(e.message)?'اسم المستخدم مستخدم مسبقًا.':e.message)}
+  res.redirect('/admin/participants');
+}));
+app.post('/admin/participants/:id/reset-password',auth,adminOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const temp=crypto.randomBytes(5).toString('base64').replace(/[^a-zA-Z0-9]/g,'').slice(0,8) || 'Reset1234';
+  const r=await db.prepare("UPDATE users SET password_hash=?,must_change_password=1 WHERE id=? AND role='participant'").run(bcrypt.hashSync(temp,10),id);
+  if(r.changes) flash(req,'success',`تم إنشاء رمز مؤقت: ${temp} — سلّمه للمشارك، وسيُطلب منه تغييره عند أول دخول. لن يظهر هذا الرمز مرة أخرى.`);
+  else flash(req,'error','تعذر إنشاء الرمز.');
   res.redirect('/admin/participants');
 }));
 app.post('/admin/participants/:id/adjust',auth,adminOnly,wrap(async (req,res)=>{
