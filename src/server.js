@@ -226,6 +226,7 @@ app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
   if(!week){flash(req,'error','لا يوجد أسبوع مفتوح حاليًا.'); return res.redirect('/week');}
   const notes=(req.body.notes||'').trim();
+  if(!notes){flash(req,'error','أدخل اسم الكتاب أو المادة.');return res.redirect('/week');}
   const entries=[];
   for(const type of ['reading','listening']){
     const raw=req.body[`${type}_minutes`];
