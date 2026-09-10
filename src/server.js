@@ -384,7 +384,21 @@ app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
 
 app.get('/quizzes',auth,participantOnly,wrap(async (req,res)=>{
   const assignments=await db.prepare(`SELECT qa.*,q.title,q.total_points FROM quiz_assignments qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.participant_id=? ORDER BY qa.assigned_at DESC`).all(req.session.user.id);
-  res.renderView('quizzes',{title:'اختباراتي',assignments});
+  const requests=await db.prepare(`SELECT * FROM quiz_requests WHERE participant_id=? ORDER BY requested_at DESC`).all(req.session.user.id);
+  const books=await db.prepare(`SELECT id,title FROM suggestions WHERE category='reading' AND active=1 ORDER BY title`).all();
+  res.renderView('quizzes',{title:'اختباراتي',assignments,requests,books});
+}));
+app.post('/quizzes/request',auth,participantOnly,wrap(async (req,res)=>{
+  const suggestionId=req.body.suggestion_id?Number(req.body.suggestion_id):null;
+  let bookTitle=(req.body.book_title||'').trim();
+  if(suggestionId){
+    const s=await db.prepare('SELECT title FROM suggestions WHERE id=?').get(suggestionId);
+    if(s) bookTitle=s.title;
+  }
+  if(!bookTitle){flash(req,'error','اختر كتاب أو اكتب اسمه.');return res.redirect('/quizzes');}
+  await db.prepare('INSERT INTO quiz_requests(participant_id,suggestion_id,book_title,note) VALUES(?,?,?,?)').run(req.session.user.id,suggestionId,bookTitle,(req.body.note||'').trim()||null);
+  flash(req,'success','تم إرسال طلبك، وبانتظار تجهيز الاختبار.');
+  res.redirect('/quizzes');
 }));
 app.get('/quizzes/:id',auth,participantOnly,wrap(async (req,res)=>{
   const assignment=await db.prepare('SELECT qa.*,q.title,q.total_points FROM quiz_assignments qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.id=? AND qa.participant_id=?').get(Number(req.params.id),req.session.user.id);
@@ -462,6 +476,15 @@ app.get('/admin',auth,adminOnly,wrap(async (req,res)=>{
   };
   const pending=await db.prepare(`SELECT a.*,u.name,w.week_number FROM activity_logs a JOIN users u ON u.id=a.participant_id JOIN weekly_goals w ON w.id=a.weekly_goal_id WHERE a.status='pending' ORDER BY a.id DESC LIMIT 8`).all();
   res.renderView('admin-dashboard',{title:'لوحة التحكم',stats,pending});
+}));
+
+app.get('/admin/quiz-requests',auth,adminOnly,wrap(async (req,res)=>{
+  const requests=await db.prepare(`SELECT qr.*,u.name participant_name FROM quiz_requests qr JOIN users u ON u.id=qr.participant_id ORDER BY (qr.status='pending') DESC, qr.requested_at DESC`).all();
+  res.renderView('admin-quiz-requests',{title:'طلبات الاختبارات',requests});
+}));
+app.post('/admin/quiz-requests/:id/fulfill',auth,adminOnly,wrap(async (req,res)=>{
+  await db.prepare("UPDATE quiz_requests SET status='fulfilled' WHERE id=?").run(Number(req.params.id));
+  flash(req,'success','تم وضع علامة مكتمل.'); res.redirect('/admin/quiz-requests');
 }));
 
 app.get('/admin/approvals',auth,adminOnly,wrap(async (req,res)=>{
