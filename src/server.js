@@ -225,15 +225,15 @@ app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
 app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
   const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
   if(!week){flash(req,'error','لا يوجد أسبوع مفتوح حاليًا.'); return res.redirect('/week');}
-  const notes=(req.body.notes||'').trim();
-  if(!notes){flash(req,'error','أدخل اسم الكتاب أو المادة.');return res.redirect('/week');}
+  const notesByType={reading:(req.body.reading_notes||'').trim(),listening:(req.body.listening_notes||'').trim()};
   const entries=[];
   for(const type of ['reading','listening']){
     const raw=req.body[`${type}_minutes`];
     if(raw===undefined||raw==='') continue;
     const minutes=Number(raw);
     if(!Number.isInteger(minutes)||minutes<1||minutes>1440){flash(req,'error','تحقق من عدد الدقائق (بين 1 و1440).');return res.redirect('/week');}
-    entries.push({type,minutes});
+    if(!notesByType[type]){flash(req,'error',type==='reading'?'أدخل اسم الكتاب.':'أدخل اسم المادة المسموعة.');return res.redirect('/week');}
+    entries.push({type,minutes,notes:notesByType[type]});
   }
   if(!entries.length){flash(req,'error','أدخل دقائق القراءة أو الاستماع (أو كلاهما).');return res.redirect('/week');}
   for(const {type,minutes} of entries){
@@ -241,7 +241,7 @@ app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
     if(duplicate){flash(req,'error',`يوجد إنجاز ${type==='reading'?'قراءة':'استماع'} مماثل مسجل لهذا الأسبوع بالفعل.`);return res.redirect('/week');}
   }
   const approvalRequired=(await setting('approval_required','1'))==='1';
-  for(const {type,minutes} of entries){
+  for(const {type,minutes,notes} of entries){
     if(approvalRequired){
       await db.prepare('INSERT INTO activity_logs(participant_id,weekly_goal_id,activity_type,minutes,notes,status) VALUES(?,?,?,?,?,?)').run(req.session.user.id,week.id,type,minutes,notes,'pending');
     } else {
