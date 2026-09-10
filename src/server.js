@@ -220,7 +220,16 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
     if(hoursLeft>0 && hoursLeft<=48) deadlineReminder=`⏰ يتبقى أقل من ${Math.max(1,Math.round(hoursLeft))} ساعة لإكمال هدف هذا الأسبوع.`;
   }
   const myRankRow=await db.prepare(`SELECT COUNT(*)+1 c FROM participants p2 JOIN users u2 ON u2.id=p2.user_id WHERE u2.active=1 AND p2.lifetime_minutes>?`).get(p.lifetime_minutes);
-  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c)});
+  const tickerBenefits=await db.prepare(`SELECT b.text,u.name FROM benefits b JOIN users u ON u.id=b.participant_id WHERE b.status='approved' ORDER BY b.id DESC LIMIT 20`).all();
+  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c),tickerBenefits});
+}));
+app.post('/benefits/submit',auth,participantOnly,wrap(async (req,res)=>{
+  const text=(req.body.text||'').trim();
+  if(!text){flash(req,'error','اكتب الفائدة أولًا.');return res.redirect('/dashboard');}
+  if(text.length>280){flash(req,'error','الفائدة طويلة جدًا (280 حرف كحد أقصى).');return res.redirect('/dashboard');}
+  await db.prepare('INSERT INTO benefits(participant_id,text) VALUES(?,?)').run(req.session.user.id,text);
+  flash(req,'success','تم إرسال فائدتك، وبانتظار اعتماد المشرف.');
+  res.redirect('/dashboard');
 }));
 
 app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
@@ -476,6 +485,33 @@ app.get('/admin',auth,adminOnly,wrap(async (req,res)=>{
   };
   const pending=await db.prepare(`SELECT a.*,u.name,w.week_number FROM activity_logs a JOIN users u ON u.id=a.participant_id JOIN weekly_goals w ON w.id=a.weekly_goal_id WHERE a.status='pending' ORDER BY a.id DESC LIMIT 8`).all();
   res.renderView('admin-dashboard',{title:'لوحة التحكم',stats,pending});
+}));
+
+app.get('/admin/benefits',auth,adminOnly,wrap(async (req,res)=>{
+  const items=await db.prepare(`SELECT b.*,u.name participant_name FROM benefits b JOIN users u ON u.id=b.participant_id WHERE b.status='pending' ORDER BY b.id ASC`).all();
+  res.renderView('admin-benefits',{title:'الفوائد المعلقة',items});
+}));
+app.post('/admin/benefits/:id/approve',auth,adminOnly,wrap(async (req,res)=>{
+  await db.transaction(async ()=>{
+    const b=await db.prepare("SELECT * FROM benefits WHERE id=? AND status='pending'").get(Number(req.params.id));
+    if(!b) return;
+    await db.prepare("UPDATE benefits SET status='approved',reviewed_by=?,reviewed_at=now() WHERE id=?").run(req.session.user.id,b.id);
+    const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(b.participant_id);
+    const walletAfter=p.wallet_minutes+b.awarded_points, lifeAfter=p.lifetime_minutes+b.awarded_points;
+    await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,b.participant_id);
+    await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(b.participant_id,'earn',b.awarded_points,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'benefit',b.id,'فائدة معتمدة',req.session.user.id);
+    await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(b.participant_id,'تم اعتماد فائدتك',`أضيفت ${b.awarded_points} دقيقة إلى رصيدك.`);
+  })();
+  flash(req,'success','تم اعتماد الفائدة وإضافة الدقائق.'); res.redirect('/admin/benefits');
+}));
+app.post('/admin/benefits/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
+  const r=await db.prepare("UPDATE benefits SET status='rejected',reviewed_by=?,review_note=?,reviewed_at=now() WHERE id=? AND status='pending'").run(req.session.user.id,req.body.note||'',Number(req.params.id));
+  if(r.changes){
+    const b=await db.prepare('SELECT participant_id FROM benefits WHERE id=?').get(Number(req.params.id));
+    await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(b.participant_id,'تم رفض الفائدة',req.body.note||'راجع المشرف لمعرفة التفاصيل.');
+  }
+  flash(req,'success','تم رفض الفائدة.'); res.redirect('/admin/benefits');
 }));
 
 app.get('/admin/quiz-requests',auth,adminOnly,wrap(async (req,res)=>{
