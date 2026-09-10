@@ -167,10 +167,10 @@ async function getStreak(participantId){
   return streak;
 }
 const BADGE_DEFS=[
-  {id:'start',icon:'📚',name:'بداية الرحلة',desc:'أول 100 دقيقة في رحلتك',test:(p,streak)=>p.lifetime_minutes>=100,remain:(p,streak)=>Math.max(0,100-p.lifetime_minutes)+' دقيقة متبقية'},
+  {id:'start',icon:'📚',name:'بداية الرحلة',desc:'أول 200 دقيقة في رحلتك',test:(p,streak)=>p.lifetime_minutes>=200,remain:(p,streak)=>Math.max(0,200-p.lifetime_minutes)+' دقيقة متبقية'},
   {id:'streak5',icon:'🔥',name:'سلسلة 5 أسابيع',desc:'أكملت هدف 5 أسابيع متتالية',test:(p,streak)=>streak>=5,remain:(p,streak)=>Math.max(0,5-streak)+' أسابيع متبقية'},
-  {id:'reader500',icon:'📖',name:'قارئ نهم',desc:'500 دقيقة قراءة معتمدة',test:(p,streak)=>p.reading_minutes>=500,remain:(p,streak)=>Math.max(0,500-p.reading_minutes)+' دقيقة متبقية'},
-  {id:'listener500',icon:'🎧',name:'مستمع مثابر',desc:'500 دقيقة استماع معتمدة',test:(p,streak)=>p.listening_minutes>=500,remain:(p,streak)=>Math.max(0,500-p.listening_minutes)+' دقيقة متبقية'},
+  {id:'reader500',icon:'📖',name:'قارئ نهم',desc:'1300 دقيقة قراءة معتمدة',test:(p,streak)=>p.reading_minutes>=1300,remain:(p,streak)=>Math.max(0,1300-p.reading_minutes)+' دقيقة متبقية'},
+  {id:'listener500',icon:'🎧',name:'مستمع مثابر',desc:'1300 دقيقة استماع معتمدة',test:(p,streak)=>p.listening_minutes>=1300,remain:(p,streak)=>Math.max(0,1300-p.listening_minutes)+' دقيقة متبقية'},
   {id:'topRank',icon:'👑',name:'من أهل المكتبة',desc:'وصلت إلى أعلى رتبة',test:(p,streak)=>p.rank && p.rank.name==='من أهل المكتبة',remain:()=>'واصل رحلتك للوصول'},
 ];
 function computeBadges(p,streak){
