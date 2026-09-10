@@ -221,36 +221,50 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
   }
   const myRankRow=await db.prepare(`SELECT COUNT(*)+1 c FROM participants p2 JOIN users u2 ON u2.id=p2.user_id WHERE u2.active=1 AND p2.lifetime_minutes>?`).get(p.lifetime_minutes);
   const tickerBenefits=await db.prepare(`SELECT b.text,u.name FROM benefits b JOIN users u ON u.id=b.participant_id WHERE b.status='approved' AND b.reviewed_at>=now()-interval '7 days' ORDER BY b.id DESC LIMIT 30`).all();
-  const dailyQuestion=await getTodayQuestion('arabic');
-  let dailyAnswer=null;
-  if(dailyQuestion) dailyAnswer=await db.prepare("SELECT * FROM daily_answers WHERE participant_id=? AND answer_date=now()::date").get(p.id);
-  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c),tickerBenefits,dailyQuestion,dailyAnswer});
+  const dailyQuestions=await getTodayQuestions(5);
+  let dailyAnswers=[];
+  if(dailyQuestions.length) dailyAnswers=await db.prepare("SELECT * FROM daily_answers WHERE participant_id=? AND answer_date=now()::date").all(p.id);
+  res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c),tickerBenefits,dailyQuestions,dailyAnswers});
 }));
-async function getTodayQuestion(category){
-  const questions=await db.prepare('SELECT * FROM daily_questions WHERE category=? AND active=1 ORDER BY id').all(category);
-  if(!questions.length) return null;
-  const dayIndex=Math.floor(Date.now()/86400000)%questions.length;
-  return questions[dayIndex];
+async function getTodayQuestions(count){
+  const questions=await db.prepare('SELECT * FROM daily_questions WHERE active=1 ORDER BY id').all();
+  if(!questions.length) return [];
+  const n=questions.length;
+  const dayNumber=Math.floor(Date.now()/86400000);
+  const start=(dayNumber*count)%n;
+  const picked=[];
+  for(let i=0;i<Math.min(count,n);i++) picked.push(questions[(start+i)%n]);
+  return picked;
 }
 app.post('/daily-question/answer',auth,participantOnly,wrap(async (req,res)=>{
-  const question=await getTodayQuestion('arabic');
-  if(!question){ return res.redirect('/dashboard'); }
-  const existing=await db.prepare("SELECT id FROM daily_answers WHERE participant_id=? AND answer_date=now()::date").get(req.session.user.id);
-  if(existing){ flash(req,'error','أجبت على سؤال اليوم مسبقًا.'); return res.redirect('/dashboard'); }
-  const chosen=Number(req.body.choice);
-  const isCorrect=chosen===question.correct_index;
-  const points=isCorrect?question.points:0;
+  const questions=await getTodayQuestions(5);
+  if(!questions.length){ return res.redirect('/dashboard'); }
+  const already=await db.prepare("SELECT question_id FROM daily_answers WHERE participant_id=? AND answer_date=now()::date").all(req.session.user.id);
+  const answeredIds=new Set(already.map(a=>a.question_id));
+  let totalPoints=0, correctCount=0, answeredNow=0;
   await db.transaction(async ()=>{
-    await db.prepare('INSERT INTO daily_answers(participant_id,question_id,answer_date,chosen_index,is_correct,points_awarded) VALUES(?,?,now()::date,?,?,?)').run(req.session.user.id,question.id,chosen,isCorrect?1:0,points);
-    if(points>0){
+    for(const q of questions){
+      if(answeredIds.has(q.id)) continue;
+      const raw=req.body[`q_${q.id}`];
+      if(raw===undefined) continue;
+      answeredNow++;
+      const chosen=Number(raw);
+      const isCorrect=chosen===q.correct_index;
+      const points=isCorrect?q.points:0;
+      if(isCorrect) correctCount++;
+      await db.prepare('INSERT INTO daily_answers(participant_id,question_id,answer_date,chosen_index,is_correct,points_awarded) VALUES(?,?,now()::date,?,?,?)').run(req.session.user.id,q.id,chosen,isCorrect?1:0,points);
+      totalPoints+=points;
+    }
+    if(totalPoints>0){
       const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(req.session.user.id);
-      const walletAfter=p.wallet_minutes+points, lifeAfter=p.lifetime_minutes+points;
+      const walletAfter=p.wallet_minutes+totalPoints, lifeAfter=p.lifetime_minutes+totalPoints;
       await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,req.session.user.id);
-      await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',points,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'daily_question',question.id,'سؤال اليوم',null);
+      await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reason,created_by)
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',totalPoints,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'daily_question','أسئلة اليوم',null);
     }
   })();
-  flash(req,isCorrect?'success':'error',isCorrect?`إجابة صحيحة! +${points} دقيقة.`:'إجابة غير صحيحة، حاول بكرة 🙂');
+  if(answeredNow===0) flash(req,'error','أجبت على أسئلة اليوم مسبقًا.');
+  else flash(req,'success',`أجبت صح على ${correctCount} من ${answeredNow} — حصلت على ${totalPoints} دقيقة.`);
   res.redirect('/dashboard');
 }));
 app.post('/benefits/submit',auth,participantOnly,wrap(async (req,res)=>{
