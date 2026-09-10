@@ -382,6 +382,42 @@ app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
 }));
 
+app.get('/quizzes',auth,participantOnly,wrap(async (req,res)=>{
+  const assignments=await db.prepare(`SELECT qa.*,q.title,q.total_points FROM quiz_assignments qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.participant_id=? ORDER BY qa.assigned_at DESC`).all(req.session.user.id);
+  res.renderView('quizzes',{title:'اختباراتي',assignments});
+}));
+app.get('/quizzes/:id',auth,participantOnly,wrap(async (req,res)=>{
+  const assignment=await db.prepare('SELECT qa.*,q.title,q.total_points FROM quiz_assignments qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.id=? AND qa.participant_id=?').get(Number(req.params.id),req.session.user.id);
+  if(!assignment) return res.renderView('message',{title:'غير موجود',message:'الاختبار غير موجود.'});
+  if(assignment.status==='completed') return res.redirect('/quizzes');
+  const questions=await db.prepare('SELECT id,question_text,options,points FROM quiz_questions WHERE quiz_id=? ORDER BY sort_order,id').all(assignment.quiz_id);
+  res.renderView('quiz-take',{title:assignment.title,assignment,questions});
+}));
+app.post('/quizzes/:id/submit',auth,participantOnly,wrap(async (req,res)=>{
+  const assignment=await db.prepare('SELECT * FROM quiz_assignments WHERE id=? AND participant_id=?').get(Number(req.params.id),req.session.user.id);
+  if(!assignment||assignment.status==='completed') return res.redirect('/quizzes');
+  const questions=await db.prepare('SELECT * FROM quiz_questions WHERE quiz_id=?').all(assignment.quiz_id);
+  let earned=0, correctCount=0;
+  for(const q of questions){
+    const chosen=req.body[`q_${q.id}`];
+    if(chosen!==undefined && Number(chosen)===q.correct_index){ earned+=q.points; correctCount++; }
+  }
+  const scorePct=Math.round((correctCount/questions.length)*100);
+  await db.transaction(async ()=>{
+    await db.prepare("UPDATE quiz_assignments SET status='completed',completed_at=now(),score=?,awarded_points=? WHERE id=?").run(scorePct,earned,assignment.id);
+    if(earned>0){
+      const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(req.session.user.id);
+      const walletAfter=p.wallet_minutes+earned, lifeAfter=p.lifetime_minutes+earned;
+      await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,req.session.user.id);
+      const quiz=await db.prepare('SELECT title FROM quizzes WHERE id=?').get(assignment.quiz_id);
+      await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',earned,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'quiz',assignment.id,`اختبار: ${quiz.title}`,null);
+    }
+  })();
+  flash(req,'success',`نتيجتك: ${correctCount} من ${questions.length} صحيحة — حصلت على ${earned} دقيقة.`);
+  res.redirect('/quizzes');
+}));
+
 // ولي الأمر (قراءة فقط)
 app.get('/guardian',auth,guardianOnly,wrap(async (req,res)=>{
   const stats=await db.prepare("SELECT COUNT(*) c FROM users WHERE role='participant' AND active=1").get();
