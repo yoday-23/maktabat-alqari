@@ -220,7 +220,7 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
     if(hoursLeft>0 && hoursLeft<=48) deadlineReminder=`⏰ يتبقى أقل من ${Math.max(1,Math.round(hoursLeft))} ساعة لإكمال هدف هذا الأسبوع.`;
   }
   const myRankRow=await db.prepare(`SELECT COUNT(*)+1 c FROM participants p2 JOIN users u2 ON u2.id=p2.user_id WHERE u2.active=1 AND p2.lifetime_minutes>?`).get(p.lifetime_minutes);
-  const tickerBenefits=await db.prepare(`SELECT b.text,u.name FROM benefits b JOIN users u ON u.id=b.participant_id WHERE b.status='approved' ORDER BY b.id DESC LIMIT 20`).all();
+  const tickerBenefits=await db.prepare(`SELECT b.text,u.name FROM benefits b JOIN users u ON u.id=b.participant_id WHERE b.status='approved' AND b.reviewed_at>=now()-interval '7 days' ORDER BY b.id DESC LIMIT 30`).all();
   res.renderView('dashboard',{title:'الرئيسية',p,week,progress,pending,rewardNow,tx,notifications,streak,badges,celebratePromotion,celebrateWeek,deadlineReminder,myLeaderboardRank:Number(myRankRow.c),tickerBenefits});
 }));
 app.post('/benefits/submit',auth,participantOnly,wrap(async (req,res)=>{
