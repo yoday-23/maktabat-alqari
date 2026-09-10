@@ -179,7 +179,7 @@ function computeBadges(p,streak){
 
 app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
   const p=await participantSummary(req.session.user.id);
-  const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' OR (starts_at<=now() AND ends_at>=now()) ORDER BY week_number DESC LIMIT 1").get();
   let progress={reading:0,listening:0}, pending={reading:0,listening:0};
   if(week){
     const rows=await db.prepare(`SELECT activity_type,status,COALESCE(SUM(minutes),0) total FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND status IN ('approved','pending') GROUP BY activity_type,status`).all(p.id,week.id);
@@ -218,12 +218,12 @@ app.get('/dashboard',auth,participantOnly,wrap(async (req,res)=>{
 }));
 
 app.get('/week',auth,participantOnly,wrap(async (req,res)=>{
-  const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' OR (starts_at<=now() AND ends_at>=now()) ORDER BY week_number DESC LIMIT 1").get();
   const logs=week?await db.prepare('SELECT * FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? ORDER BY id DESC').all(req.session.user.id,week.id):[];
   res.renderView('week',{title:'هذا الأسبوع',week,logs});
 }));
 app.post('/week/submit',auth,participantOnly,wrap(async (req,res)=>{
-  const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' ORDER BY week_number DESC LIMIT 1").get();
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE status='open' OR (starts_at<=now() AND ends_at>=now()) ORDER BY week_number DESC LIMIT 1").get();
   if(!week){flash(req,'error','لا يوجد أسبوع مفتوح حاليًا.'); return res.redirect('/week');}
   const notesByType={reading:(req.body.reading_notes||'').trim(),listening:(req.body.listening_notes||'').trim()};
   const entries=[];
