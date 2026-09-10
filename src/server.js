@@ -106,6 +106,7 @@ function auth(req,res,next){ if(!req.session.user) return res.redirect('/login')
 function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session.user?.role) ? next() : res.renderView('message',{title:'غير مصرح',message:req.session.user?.role==='participant'?'هذا الحساب مخصص للمشاركين، ولا يملك صلاحية دخول لوحة الإدارة.':'لا تملك صلاحية الوصول إلى هذه الصفحة.'},403); }
 function participantOnly(req,res,next){ return roles('participant')(req,res,next); }
 function adminOnly(req,res,next){ return roles('supervisor','manager')(req,res,next); }
+function guardianOnly(req,res,next){ return roles('guardian')(req,res,next); }
 
 app.use(async (req,res,next)=>{
   res.locals.user=req.session.user || null;
@@ -127,9 +128,13 @@ app.use(async (req,res,next)=>{
   next();
 });
 
-app.get('/',(req,res)=> res.redirect(req.session.user ? (req.session.user.role==='participant'?'/dashboard':'/admin') : '/login'));
+app.get('/',(req,res)=>{
+  if(!req.session.user) return res.redirect('/login');
+  const role=req.session.user.role;
+  res.redirect(role==='participant'?'/dashboard':role==='guardian'?'/guardian':'/admin');
+});
 app.get('/login',(req,res)=>{
-  if(req.session.user) return res.redirect(req.session.user.role==='participant'?'/dashboard':'/admin');
+  if(req.session.user){ const role=req.session.user.role; return res.redirect(role==='participant'?'/dashboard':role==='guardian'?'/guardian':'/admin'); }
   res.renderView('login',{title:'تسجيل الدخول'});
 });
 app.post('/login', wrap(async (req,res)=>{
@@ -139,7 +144,8 @@ app.post('/login', wrap(async (req,res)=>{
     return res.renderView('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'},401);
   }
   req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password};
-  res.redirect(user.must_change_password?'/account':(user.role==='participant'?'/dashboard':'/admin'));
+  const homeByRole = user.role==='participant'?'/dashboard':user.role==='guardian'?'/guardian':'/admin';
+  res.redirect(user.must_change_password?'/account':homeByRole);
 }));
 app.post('/logout',(req,res)=>{ req.session=null; res.redirect('/login'); });
 
@@ -374,6 +380,34 @@ app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   const items=await db.prepare('SELECT * FROM suggestions WHERE active=1 ORDER BY section,category,sort_order').all();
   const sectionNames=[...new Set(items.map(i=>i.section))];
   res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
+}));
+
+// ولي الأمر (قراءة فقط)
+app.get('/guardian',auth,guardianOnly,wrap(async (req,res)=>{
+  const stats=await db.prepare("SELECT COUNT(*) c FROM users WHERE role='participant' AND active=1").get();
+  res.renderView('guardian-home',{title:'أولياء الأمور',participantsCount:Number(stats.c)});
+}));
+app.get('/guardian/leaderboard',auth,guardianOnly,wrap(async (req,res)=>{
+  const rows=await db.prepare(`SELECT u.id user_id,u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 30`).all();
+  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:null,myUserId:null});
+}));
+app.get('/guardian/participants',auth,guardianOnly,wrap(async (req,res)=>{
+  const participants=await db.prepare(`SELECT u.id,u.name,p.* FROM users u JOIN participants p ON p.user_id=u.id WHERE u.active=1 ORDER BY u.name`).all();
+  const withRanks = await Promise.all(participants.map(async pt => ({...pt, rank: await getRank(pt.lifetime_minutes)})));
+  res.renderView('guardian-participants',{title:'المشاركون',participants:withRanks});
+}));
+app.get('/guardian/participants/:id',auth,guardianOnly,wrap(async (req,res)=>{
+  const p=await participantSummary(Number(req.params.id));
+  if(!p) return res.renderView('message',{title:'غير موجود',message:'المشارك غير موجود.'});
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  let progress={reading:0,listening:0};
+  if(week){
+    const rows=await db.prepare(`SELECT activity_type,COALESCE(SUM(minutes),0) total FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND status='approved' GROUP BY activity_type`).all(p.id,week.id);
+    rows.forEach(r=>{ progress[r.activity_type]=Number(r.total); });
+  }
+  const streak=await getStreak(p.id);
+  const badges=computeBadges(p,streak);
+  res.renderView('guardian-child',{title:p.name,p,week,progress,streak,badges});
 }));
 
 // Admin
