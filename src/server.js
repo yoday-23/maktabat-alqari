@@ -463,9 +463,17 @@ app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
     JOIN users ch ON ch.id=c.challenger_id JOIN users op ON op.id=c.opponent_id WHERE c.id=?`).get(id);
   if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.renderView('message',{title:'غير موجود',message:'التحدي غير موجود.'});
   if(challenge.status==='pending') return res.renderView('message',{title:'قريبًا',message:'الأسئلة لسا يتم تجهيزها، راجع لاحقًا.'});
+  const amChallenger=challenge.challenger_id===req.session.user.id;
+  const opponentId=amChallenger?challenge.opponent_id:challenge.challenger_id;
+  const opponentName=amChallenger?challenge.opponent_name:challenge.challenger_name;
+  const myReady=amChallenger?challenge.challenger_ready:challenge.opponent_ready;
+  const opponentReady=amChallenger?challenge.opponent_ready:challenge.challenger_ready;
+  const bothReady=!!(challenge.challenger_ready&&challenge.opponent_ready);
+  if(challenge.status==='active'&&!bothReady){
+    return res.renderView('challenge-lobby',{title:'تحدي',challenge,opponentName,myReady:!!myReady,opponentReady:!!opponentReady});
+  }
   const questions=await db.prepare('SELECT id,question_text,options FROM challenge_questions WHERE challenge_id=? ORDER BY sort_order,id').all(id);
   const myAnswers=await db.prepare('SELECT question_index,is_correct FROM challenge_answers WHERE challenge_id=? AND participant_id=?').all(id,req.session.user.id);
-  const opponentId=challenge.challenger_id===req.session.user.id?challenge.opponent_id:challenge.challenger_id;
   const opponentAnswers=await db.prepare('SELECT question_index,is_correct FROM challenge_progress WHERE challenge_id=? AND participant_id=?').all(id,opponentId);
   let myScore=null, opponentScore=null;
   if(challenge.status==='completed'){
@@ -474,14 +482,23 @@ app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
     myScore=Number(mine.s); opponentScore=Number(theirs.s);
   }
   res.renderView('challenge-play',{title:'تحدي',challenge,questions,myAnswers,opponentAnswers,opponentId,myScore,opponentScore,
-    opponentName:challenge.challenger_id===req.session.user.id?challenge.opponent_name:challenge.challenger_name,
+    opponentName,
     supabaseUrl:'https://locvesnwjwlwnxsamonx.supabase.co',
     supabaseAnonKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxvY3Zlc253andsd254c2Ftb254Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg3Mzk5NjcsImV4cCI6MjEwNDMxNTk2N30.nsXF8SRiVobC1T6BJ-WiW49ECuVYpJD8h4wDjFKPu3w'});
 }));
+app.post('/challenges/:id/ready',auth,participantOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const challenge=await db.prepare('SELECT * FROM challenges WHERE id=?').get(id);
+  if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.redirect('/challenges');
+  const amChallenger=challenge.challenger_id===req.session.user.id;
+  if(amChallenger) await db.prepare('UPDATE challenges SET challenger_ready=1 WHERE id=?').run(id);
+  else await db.prepare('UPDATE challenges SET opponent_ready=1 WHERE id=?').run(id);
+  res.redirect('/challenges/'+id);
+}));
 app.get('/api/challenges/:id/status',auth,participantOnly,wrap(async (req,res)=>{
-  const challenge=await db.prepare('SELECT status,challenger_id,opponent_id FROM challenges WHERE id=?').get(Number(req.params.id));
-  if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.status(404).json({completed:false});
-  res.json({completed:challenge.status==='completed'});
+  const challenge=await db.prepare('SELECT status,challenger_id,opponent_id,challenger_ready,opponent_ready FROM challenges WHERE id=?').get(Number(req.params.id));
+  if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.status(404).json({completed:false,bothReady:false});
+  res.json({completed:challenge.status==='completed',bothReady:!!(challenge.challenger_ready&&challenge.opponent_ready)});
 }));
 app.post('/api/challenges/:id/answer',auth,participantOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id);
