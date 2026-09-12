@@ -112,6 +112,10 @@ function challengesOnly(req,res,next){
   if(req.session.user?.challengesEnabled===false) return res.renderView('message',{title:'غير متاح',message:'ميزة التحديات غير مفعّلة لحسابك.'},403);
   return participantOnly(req,res,next);
 }
+function messagingOnly(req,res,next){
+  if(!req.session.user?.messagingEnabled) return res.renderView('message',{title:'غير متاح',message:'ميزة الرسائل غير مفعّلة لحسابك.'},403);
+  return participantOnly(req,res,next);
+}
 
 app.use(async (req,res,next)=>{
   res.locals.user=req.session.user || null;
@@ -149,7 +153,7 @@ app.post('/login', wrap(async (req,res)=>{
   if(!user || !bcrypt.compareSync(password||'',user.password_hash)){
     return res.renderView('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'},401);
   }
-  req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password,challengesEnabled:user.challenges_enabled!==0};
+  req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password,challengesEnabled:user.challenges_enabled!==0,messagingEnabled:!!user.messaging_enabled};
   const homeByRole = user.role==='participant'?'/dashboard':user.role==='guardian'?'/guardian':'/admin';
   res.redirect(user.must_change_password?'/account':homeByRole);
 }));
@@ -439,6 +443,54 @@ app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   const items=await db.prepare('SELECT * FROM suggestions WHERE active=1 ORDER BY section,category,sort_order').all();
   const sectionNames=[...new Set(items.map(i=>i.section))];
   res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
+}));
+
+app.get('/messages',auth,messagingOnly,wrap(async (req,res)=>{
+  const msgs=await db.prepare('SELECT * FROM direct_messages WHERE participant_id=? ORDER BY id ASC').all(req.session.user.id);
+  await db.prepare('UPDATE direct_messages SET read_by_participant=1 WHERE participant_id=? AND sender_role=?').run(req.session.user.id,'admin');
+  res.renderView('messages',{title:'الرسائل',msgs,lastId:msgs.length?msgs[msgs.length-1].id:0});
+}));
+app.post('/messages/send',auth,messagingOnly,wrap(async (req,res)=>{
+  const body=(req.body.body||'').trim();
+  if(!body){return res.redirect('/messages');}
+  await db.prepare('INSERT INTO direct_messages(participant_id,sender_role,sender_id,body) VALUES(?,?,?,?)').run(req.session.user.id,'participant',req.session.user.id,body.slice(0,1000));
+  res.redirect('/messages');
+}));
+app.get('/api/messages/poll',auth,messagingOnly,wrap(async (req,res)=>{
+  const since=Number(req.query.since)||0;
+  const msgs=await db.prepare('SELECT * FROM direct_messages WHERE participant_id=? AND id>? ORDER BY id ASC').all(req.session.user.id,since);
+  if(msgs.length) await db.prepare('UPDATE direct_messages SET read_by_participant=1 WHERE participant_id=? AND sender_role=?').run(req.session.user.id,'admin');
+  res.json({messages:msgs});
+}));
+
+app.get('/admin/messages',auth,adminOnly,wrap(async (req,res)=>{
+  const list=await db.prepare(`SELECT u.id,u.name,
+    (SELECT body FROM direct_messages WHERE participant_id=u.id ORDER BY id DESC LIMIT 1) last_body,
+    (SELECT created_at FROM direct_messages WHERE participant_id=u.id ORDER BY id DESC LIMIT 1) last_at,
+    (SELECT COUNT(*) FROM direct_messages WHERE participant_id=u.id AND sender_role='participant' AND read_by_admin=0) unread
+    FROM users u WHERE u.messaging_enabled=1 AND u.role='participant' ORDER BY u.name`).all();
+  res.renderView('admin-messages',{title:'الرسائل',list});
+}));
+app.get('/admin/messages/:id',auth,adminOnly,wrap(async (req,res)=>{
+  const pid=Number(req.params.id);
+  const participant=await db.prepare("SELECT id,name FROM users WHERE id=? AND messaging_enabled=1 AND role='participant'").get(pid);
+  if(!participant) return res.renderView('message',{title:'غير موجود',message:'هذا المشارك ما عنده رسائل مفعّلة.'});
+  const msgs=await db.prepare('SELECT * FROM direct_messages WHERE participant_id=? ORDER BY id ASC').all(pid);
+  await db.prepare('UPDATE direct_messages SET read_by_admin=1 WHERE participant_id=? AND sender_role=?').run(pid,'participant');
+  res.renderView('admin-message-thread',{title:'محادثة مع '+participant.name,participant,msgs,lastId:msgs.length?msgs[msgs.length-1].id:0});
+}));
+app.post('/admin/messages/:id/send',auth,adminOnly,wrap(async (req,res)=>{
+  const pid=Number(req.params.id);
+  const body=(req.body.body||'').trim();
+  if(body) await db.prepare('INSERT INTO direct_messages(participant_id,sender_role,sender_id,body) VALUES(?,?,?,?)').run(pid,'admin',req.session.user.id,body.slice(0,1000));
+  res.redirect('/admin/messages/'+pid);
+}));
+app.get('/api/admin/messages/:id/poll',auth,adminOnly,wrap(async (req,res)=>{
+  const pid=Number(req.params.id);
+  const since=Number(req.query.since)||0;
+  const msgs=await db.prepare('SELECT * FROM direct_messages WHERE participant_id=? AND id>? ORDER BY id ASC').all(pid,since);
+  if(msgs.length) await db.prepare('UPDATE direct_messages SET read_by_admin=1 WHERE participant_id=? AND sender_role=?').run(pid,'participant');
+  res.json({messages:msgs});
 }));
 
 app.get('/challenges',auth,challengesOnly,wrap(async (req,res)=>{
