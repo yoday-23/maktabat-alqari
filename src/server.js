@@ -445,8 +445,16 @@ app.get('/challenges',auth,participantOnly,wrap(async (req,res)=>{
 app.post('/challenges/create',auth,participantOnly,wrap(async (req,res)=>{
   const opponentId=Number(req.body.opponent_id);
   if(!opponentId){flash(req,'error','اختر خصمًا.');return res.redirect('/challenges');}
-  await db.prepare("INSERT INTO challenges(challenger_id,opponent_id,status) VALUES(?,?,'pending')").run(req.session.user.id,opponentId);
-  flash(req,'success','تم إرسال طلب التحدي، وبانتظار تجهيز الأسئلة.');
+  await db.transaction(async ()=>{
+    const ins=await db.prepare("INSERT INTO challenges(challenger_id,opponent_id,status,started_at) VALUES(?,?,'active',now())").run(req.session.user.id,opponentId);
+    const cid=ins.lastInsertRowid;
+    const picks=await db.prepare('SELECT question_text,options,correct_index FROM daily_questions WHERE active=1 ORDER BY random() LIMIT 5').all();
+    let sortOrder=1;
+    for(const q of picks){
+      await db.prepare('INSERT INTO challenge_questions(challenge_id,question_text,options,correct_index,sort_order) VALUES(?,?,?,?,?)').run(cid,q.question_text,JSON.stringify(q.options),q.correct_index,sortOrder++);
+    }
+  })();
+  flash(req,'success','بدأ التحدي! افتحه الآن وجاوب على الأسئلة.');
   res.redirect('/challenges');
 }));
 app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
