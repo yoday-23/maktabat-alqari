@@ -470,6 +470,11 @@ app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
     supabaseUrl:'https://locvesnwjwlwnxsamonx.supabase.co',
     supabaseAnonKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxvY3Zlc253andsd254c2Ftb254Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg3Mzk5NjcsImV4cCI6MjEwNDMxNTk2N30.nsXF8SRiVobC1T6BJ-WiW49ECuVYpJD8h4wDjFKPu3w'});
 }));
+app.get('/api/challenges/:id/status',auth,participantOnly,wrap(async (req,res)=>{
+  const challenge=await db.prepare('SELECT status,challenger_id,opponent_id FROM challenges WHERE id=?').get(Number(req.params.id));
+  if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.status(404).json({completed:false});
+  res.json({completed:challenge.status==='completed'});
+}));
 app.post('/api/challenges/:id/answer',auth,participantOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id);
   const questionIndex=Number(req.body.question_index);
