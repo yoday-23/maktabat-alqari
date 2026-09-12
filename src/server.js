@@ -107,6 +107,11 @@ function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session
 function participantOnly(req,res,next){ return roles('participant')(req,res,next); }
 function adminOnly(req,res,next){ return roles('supervisor','manager')(req,res,next); }
 function guardianOnly(req,res,next){ return roles('guardian')(req,res,next); }
+function challengesOnly(req,res,next){
+  if(!res.locals.challengesGloballyEnabled) return res.renderView('message',{title:'غير متاح',message:'ميزة التحديات متوقفة حاليًا.'},403);
+  if(req.session.user?.challengesEnabled===false) return res.renderView('message',{title:'غير متاح',message:'ميزة التحديات غير مفعّلة لحسابك.'},403);
+  return participantOnly(req,res,next);
+}
 
 app.use(async (req,res,next)=>{
   res.locals.user=req.session.user || null;
@@ -116,6 +121,7 @@ app.use(async (req,res,next)=>{
     res.locals.programName = await setting('program_name','مكتبة القارئ');
     res.locals.vouchersEnabled = (await setting('vouchers_enabled','1')) === '1';
     res.locals.storeEnabled = (await setting('store_enabled','1')) === '1';
+    res.locals.challengesGloballyEnabled = (await setting('challenges_enabled','1')) === '1';
   }
   catch (e) { return next(e); }
   res.locals.path=req.path;
@@ -143,7 +149,7 @@ app.post('/login', wrap(async (req,res)=>{
   if(!user || !bcrypt.compareSync(password||'',user.password_hash)){
     return res.renderView('login',{title:'تسجيل الدخول',error:'اسم المستخدم أو كلمة المرور غير صحيحة.'},401);
   }
-  req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password};
+  req.session.user={id:user.id,name:user.name,role:user.role,mustChangePassword:!!user.must_change_password,challengesEnabled:user.challenges_enabled!==0};
   const homeByRole = user.role==='participant'?'/dashboard':user.role==='guardian'?'/guardian':'/admin';
   res.redirect(user.must_change_password?'/account':homeByRole);
 }));
@@ -435,14 +441,14 @@ app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
 }));
 
-app.get('/challenges',auth,participantOnly,wrap(async (req,res)=>{
+app.get('/challenges',auth,challengesOnly,wrap(async (req,res)=>{
   const mine=await db.prepare(`SELECT c.*,ch.name challenger_name,op.name opponent_name FROM challenges c
     JOIN users ch ON ch.id=c.challenger_id JOIN users op ON op.id=c.opponent_id
     WHERE c.challenger_id=? OR c.opponent_id=? ORDER BY c.id DESC`).all(req.session.user.id,req.session.user.id);
   const opponents=await db.prepare("SELECT id,name FROM users WHERE role='participant' AND active=1 AND id<>? ORDER BY name").all(req.session.user.id);
   res.renderView('challenges',{title:'تحدياتي',mine,opponents,myId:req.session.user.id});
 }));
-app.post('/challenges/create',auth,participantOnly,wrap(async (req,res)=>{
+app.post('/challenges/create',auth,challengesOnly,wrap(async (req,res)=>{
   const opponentId=Number(req.body.opponent_id);
   if(!opponentId){flash(req,'error','اختر خصمًا.');return res.redirect('/challenges');}
   await db.transaction(async ()=>{
@@ -457,7 +463,7 @@ app.post('/challenges/create',auth,participantOnly,wrap(async (req,res)=>{
   flash(req,'success','بدأ التحدي! افتحه الآن وجاوب على الأسئلة.');
   res.redirect('/challenges');
 }));
-app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
+app.get('/challenges/:id',auth,challengesOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id);
   const challenge=await db.prepare(`SELECT c.*,ch.name challenger_name,op.name opponent_name FROM challenges c
     JOIN users ch ON ch.id=c.challenger_id JOIN users op ON op.id=c.opponent_id WHERE c.id=?`).get(id);
@@ -486,7 +492,7 @@ app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
     supabaseUrl:'https://locvesnwjwlwnxsamonx.supabase.co',
     supabaseAnonKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxvY3Zlc253andsd254c2Ftb254Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg3Mzk5NjcsImV4cCI6MjEwNDMxNTk2N30.nsXF8SRiVobC1T6BJ-WiW49ECuVYpJD8h4wDjFKPu3w'});
 }));
-app.post('/challenges/:id/ready',auth,participantOnly,wrap(async (req,res)=>{
+app.post('/challenges/:id/ready',auth,challengesOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id);
   const challenge=await db.prepare('SELECT * FROM challenges WHERE id=?').get(id);
   if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.redirect('/challenges');
@@ -495,12 +501,12 @@ app.post('/challenges/:id/ready',auth,participantOnly,wrap(async (req,res)=>{
   else await db.prepare('UPDATE challenges SET opponent_ready=1 WHERE id=?').run(id);
   res.redirect('/challenges/'+id);
 }));
-app.get('/api/challenges/:id/status',auth,participantOnly,wrap(async (req,res)=>{
+app.get('/api/challenges/:id/status',auth,challengesOnly,wrap(async (req,res)=>{
   const challenge=await db.prepare('SELECT status,challenger_id,opponent_id,challenger_ready,opponent_ready FROM challenges WHERE id=?').get(Number(req.params.id));
   if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.status(404).json({completed:false,bothReady:false});
   res.json({completed:challenge.status==='completed',bothReady:!!(challenge.challenger_ready&&challenge.opponent_ready)});
 }));
-app.post('/api/challenges/:id/answer',auth,participantOnly,wrap(async (req,res)=>{
+app.post('/api/challenges/:id/answer',auth,challengesOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id);
   const questionIndex=Number(req.body.question_index);
   const chosen=Number(req.body.choice);
@@ -705,7 +711,7 @@ app.post('/admin/approvals/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
 }));
 
 app.get('/admin/participants',auth,adminOnly,wrap(async (req,res)=>{
-  const participants=await db.prepare(`SELECT u.id,u.name,u.username,u.active,p.* FROM users u JOIN participants p ON p.user_id=u.id ORDER BY u.name`).all();
+  const participants=await db.prepare(`SELECT u.id,u.name,u.username,u.active,u.challenges_enabled,p.* FROM users u JOIN participants p ON p.user_id=u.id ORDER BY u.name`).all();
   const withRanks = await Promise.all(participants.map(async pt => ({...pt, rank: await getRank(pt.lifetime_minutes)})));
   res.renderView('admin-participants',{title:'المشاركون',participants:withRanks});
 }));
@@ -725,6 +731,10 @@ app.post('/admin/participants/add',auth,adminOnly,wrap(async (req,res)=>{
 app.post('/admin/participants/:id/toggle',auth,adminOnly,wrap(async (req,res)=>{
   await db.prepare("UPDATE users SET active=CASE active WHEN 1 THEN 0 ELSE 1 END WHERE id=? AND role='participant'").run(Number(req.params.id));
   flash(req,'success','تم تحديث حالة المشارك.'); res.redirect('/admin/participants');
+}));
+app.post('/admin/participants/:id/toggle-challenges',auth,adminOnly,wrap(async (req,res)=>{
+  await db.prepare("UPDATE users SET challenges_enabled=CASE challenges_enabled WHEN 1 THEN 0 ELSE 1 END WHERE id=? AND role='participant'").run(Number(req.params.id));
+  flash(req,'success','تم تحديث ميزة التحديات لهذا المشارك.'); res.redirect('/admin/participants');
 }));
 app.post('/admin/participants/:id/update',auth,adminOnly,wrap(async (req,res)=>{
   const id=Number(req.params.id), name=(req.body.name||'').trim(), username=(req.body.username||'').trim();
@@ -901,7 +911,7 @@ app.post('/admin/staff/:id/password',auth,roles('manager'),wrap(async (req,res)=
 }));
 
 app.get('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
-  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),vouchersEnabled:await setting('vouchers_enabled','1'),storeEnabled:await setting('store_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
+  res.renderView('admin-settings',{title:'الإعدادات',approvalRequired:await setting('approval_required','1'),leaderboardEnabled:await setting('leaderboard_enabled','1'),vouchersEnabled:await setting('vouchers_enabled','1'),storeEnabled:await setting('store_enabled','1'),challengesEnabled:await setting('challenges_enabled','1'),programName:await setting('program_name','مكتبة القارئ')});
 }));
 app.post('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
   await db.transaction(async ()=>{
@@ -910,6 +920,7 @@ app.post('/admin/settings',auth,roles('manager'),wrap(async (req,res)=>{
     await up('leaderboard_enabled',req.body.leaderboard_enabled?'1':'0');
     await up('vouchers_enabled',req.body.vouchers_enabled?'1':'0');
     await up('store_enabled',req.body.store_enabled?'1':'0');
+    await up('challenges_enabled',req.body.challenges_enabled?'1':'0');
     await up('program_name',(req.body.program_name||'مكتبة القارئ').trim());
   })();
   flash(req,'success','تم حفظ الإعدادات.'); res.redirect('/admin/settings');
