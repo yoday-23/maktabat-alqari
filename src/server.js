@@ -435,6 +435,76 @@ app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   res.renderView('suggestions',{title:'مقترحات القراءة والاستماع',items,sectionNames});
 }));
 
+app.get('/challenges',auth,participantOnly,wrap(async (req,res)=>{
+  const mine=await db.prepare(`SELECT c.*,ch.name challenger_name,op.name opponent_name FROM challenges c
+    JOIN users ch ON ch.id=c.challenger_id JOIN users op ON op.id=c.opponent_id
+    WHERE c.challenger_id=? OR c.opponent_id=? ORDER BY c.id DESC`).all(req.session.user.id,req.session.user.id);
+  const opponents=await db.prepare("SELECT id,name FROM users WHERE role='participant' AND active=1 AND id<>? ORDER BY name").all(req.session.user.id);
+  res.renderView('challenges',{title:'تحدياتي',mine,opponents,myId:req.session.user.id});
+}));
+app.post('/challenges/create',auth,participantOnly,wrap(async (req,res)=>{
+  const opponentId=Number(req.body.opponent_id);
+  if(!opponentId){flash(req,'error','اختر خصمًا.');return res.redirect('/challenges');}
+  await db.prepare("INSERT INTO challenges(challenger_id,opponent_id,status) VALUES(?,?,'pending')").run(req.session.user.id,opponentId);
+  flash(req,'success','تم إرسال طلب التحدي، وبانتظار تجهيز الأسئلة.');
+  res.redirect('/challenges');
+}));
+app.get('/challenges/:id',auth,participantOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const challenge=await db.prepare(`SELECT c.*,ch.name challenger_name,op.name opponent_name FROM challenges c
+    JOIN users ch ON ch.id=c.challenger_id JOIN users op ON op.id=c.opponent_id WHERE c.id=?`).get(id);
+  if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.renderView('message',{title:'غير موجود',message:'التحدي غير موجود.'});
+  if(challenge.status==='pending') return res.renderView('message',{title:'قريبًا',message:'الأسئلة لسا يتم تجهيزها، راجع لاحقًا.'});
+  const questions=await db.prepare('SELECT id,question_text,options FROM challenge_questions WHERE challenge_id=? ORDER BY sort_order,id').all(id);
+  const myAnswers=await db.prepare('SELECT question_index,is_correct FROM challenge_answers WHERE challenge_id=? AND participant_id=?').all(id,req.session.user.id);
+  const opponentId=challenge.challenger_id===req.session.user.id?challenge.opponent_id:challenge.challenger_id;
+  const opponentAnswers=await db.prepare('SELECT question_index,is_correct FROM challenge_progress WHERE challenge_id=? AND participant_id=?').all(id,opponentId);
+  let myScore=null, opponentScore=null;
+  if(challenge.status==='completed'){
+    const mine=await db.prepare('SELECT COALESCE(SUM(is_correct),0) s FROM challenge_answers WHERE challenge_id=? AND participant_id=?').get(id,req.session.user.id);
+    const theirs=await db.prepare('SELECT COALESCE(SUM(is_correct),0) s FROM challenge_answers WHERE challenge_id=? AND participant_id=?').get(id,opponentId);
+    myScore=Number(mine.s); opponentScore=Number(theirs.s);
+  }
+  res.renderView('challenge-play',{title:'تحدي',challenge,questions,myAnswers,opponentAnswers,opponentId,myScore,opponentScore,
+    opponentName:challenge.challenger_id===req.session.user.id?challenge.opponent_name:challenge.challenger_name,
+    supabaseUrl:'https://locvesnwjwlwnxsamonx.supabase.co',
+    supabaseAnonKey:'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImxvY3Zlc253andsd254c2Ftb254Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODg3Mzk5NjcsImV4cCI6MjEwNDMxNTk2N30.nsXF8SRiVobC1T6BJ-WiW49ECuVYpJD8h4wDjFKPu3w'});
+}));
+app.post('/api/challenges/:id/answer',auth,participantOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const questionIndex=Number(req.body.question_index);
+  const chosen=Number(req.body.choice);
+  const challenge=await db.prepare('SELECT * FROM challenges WHERE id=?').get(id);
+  if(!challenge||challenge.status!=='active'||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.status(400).json({error:'not allowed'});
+  const questions=await db.prepare('SELECT * FROM challenge_questions WHERE challenge_id=? ORDER BY sort_order,id').all(id);
+  const q=questions[questionIndex];
+  if(!q) return res.status(400).json({error:'invalid question'});
+  const isCorrect=chosen===q.correct_index;
+  try{
+    await db.prepare('INSERT INTO challenge_answers(challenge_id,participant_id,question_index,chosen_index,is_correct) VALUES(?,?,?,?,?)').run(id,req.session.user.id,questionIndex,chosen,isCorrect?1:0);
+  }catch(e){ return res.status(400).json({error:'already answered'}); }
+  const myCount=await db.prepare('SELECT COUNT(*) c FROM challenge_answers WHERE challenge_id=? AND participant_id=?').get(id,req.session.user.id);
+  const finished=Number(myCount.c)>=questions.length;
+  await db.prepare('INSERT INTO challenge_progress(challenge_id,participant_id,question_index,is_correct,finished) VALUES(?,?,?,?,?)').run(id,req.session.user.id,questionIndex,isCorrect?1:0,finished?1:0);
+  if(finished){
+    const bothDone=await db.prepare(`SELECT
+      (SELECT COUNT(*) FROM challenge_answers WHERE challenge_id=? AND participant_id=?) a,
+      (SELECT COUNT(*) FROM challenge_answers WHERE challenge_id=? AND participant_id=?) b`).get(id,challenge.challenger_id,id,challenge.opponent_id);
+    if(Number(bothDone.a)>=questions.length && Number(bothDone.b)>=questions.length){
+      const scoreRow=await db.prepare(`SELECT
+        (SELECT COALESCE(SUM(is_correct),0) FROM challenge_answers WHERE challenge_id=? AND participant_id=?) sa,
+        (SELECT COALESCE(SUM(is_correct),0) FROM challenge_answers WHERE challenge_id=? AND participant_id=?) sb`).get(id,challenge.challenger_id,id,challenge.opponent_id);
+      const scoreA=Number(scoreRow.sa), scoreB=Number(scoreRow.sb);
+      const winnerId=scoreA===scoreB?null:(scoreA>scoreB?challenge.challenger_id:challenge.opponent_id);
+      await db.prepare("UPDATE challenges SET status='completed',completed_at=now(),winner_id=? WHERE id=?").run(winnerId,id);
+      const msg=winnerId?`انتهى التحدي! ${winnerId===challenge.challenger_id?challenge.challenger_name:challenge.opponent_name} فاز 🏆`:'انتهى التحدي بالتعادل 🤝';
+      await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(challenge.challenger_id,'نتيجة التحدي',msg);
+      await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(challenge.opponent_id,'نتيجة التحدي',msg);
+    }
+  }
+  res.json({correct:isCorrect,finished});
+}));
+
 app.get('/quizzes',auth,participantOnly,wrap(async (req,res)=>{
   const assignments=await db.prepare(`SELECT qa.*,q.title,q.total_points FROM quiz_assignments qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.participant_id=? ORDER BY qa.assigned_at DESC`).all(req.session.user.id);
   const requests=await db.prepare(`SELECT * FROM quiz_requests WHERE participant_id=? ORDER BY requested_at DESC`).all(req.session.user.id);
@@ -556,6 +626,12 @@ app.post('/admin/benefits/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
     await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(b.participant_id,'تم رفض الفائدة',req.body.note||'راجع المشرف لمعرفة التفاصيل.');
   }
   flash(req,'success','تم رفض الفائدة.'); res.redirect('/admin/benefits');
+}));
+
+app.get('/admin/challenges',auth,adminOnly,wrap(async (req,res)=>{
+  const list=await db.prepare(`SELECT c.*,ch.name challenger_name,op.name opponent_name FROM challenges c
+    JOIN users ch ON ch.id=c.challenger_id JOIN users op ON op.id=c.opponent_id ORDER BY (c.status='pending') DESC, c.id DESC`).all();
+  res.renderView('admin-challenges',{title:'التحديات',list});
 }));
 
 app.get('/admin/quiz-requests',auth,adminOnly,wrap(async (req,res)=>{
