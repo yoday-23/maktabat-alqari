@@ -432,8 +432,9 @@ app.get('/history',auth,participantOnly,wrap(async (req,res)=>{
   res.renderView('history',{title:'سجل مكتبتي',tx});
 }));
 
-app.get('/leaderboard',auth,participantOnly,wrap(async (req,res)=>{
-  if((await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
+app.get('/leaderboard',auth,roles('participant','supervisor','manager'),wrap(async (req,res)=>{
+  const isAdmin=req.session.user.role!=='participant';
+  if(!isAdmin&&(await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
   const rows=await db.prepare(`SELECT u.id user_id,u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 30`).all();
   const myIndex=rows.findIndex(r=>r.user_id===req.session.user.id);
   res.renderView('leaderboard',{title:'المتميزون',rows,myRank:myIndex>=0?myIndex+1:null,myUserId:req.session.user.id});
