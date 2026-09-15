@@ -266,11 +266,10 @@ app.post('/daily-question/answer',auth,participantOnly,wrap(async (req,res)=>{
       totalPoints+=points;
     }
     if(totalPoints>0){
-      const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(req.session.user.id);
-      const walletAfter=p.wallet_minutes+totalPoints, lifeAfter=p.lifetime_minutes+totalPoints;
-      await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,req.session.user.id);
+      const updated=await db.prepare('UPDATE participants SET wallet_minutes=wallet_minutes+?,lifetime_minutes=lifetime_minutes+? WHERE user_id=? RETURNING wallet_minutes,lifetime_minutes').get(totalPoints,totalPoints,req.session.user.id);
+      const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
       await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reason,created_by)
-        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',totalPoints,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'daily_question','أسئلة اليوم',null);
+        VALUES(?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',totalPoints,walletAfter-totalPoints,walletAfter,lifeAfter-totalPoints,lifeAfter,'daily_question','أسئلة اليوم',null);
     }
   })();
   if(answeredNow===0) flash(req,'error','أجبت على أسئلة اليوم مسبقًا.');
@@ -331,16 +330,17 @@ const approveLog = db.transaction(async (logId, reviewerId, note='')=>{
   const log = await db.prepare("SELECT * FROM activity_logs WHERE id=? AND status='pending'").get(logId)
     || await db.prepare("SELECT * FROM activity_logs WHERE id=? AND status='approved' AND reviewed_by IS NULL").get(logId);
   if(!log) throw new Error('هذا الإنجاز عولج مسبقًا.');
-  const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(log.participant_id);
-  const oldRank=await getRank(p.lifetime_minutes);
-  const walletAfter=p.wallet_minutes+log.minutes;
-  const lifeAfter=p.lifetime_minutes+log.minutes;
-  const readAfter=p.reading_minutes+(log.activity_type==='reading'?log.minutes:0);
-  const listenAfter=p.listening_minutes+(log.activity_type==='listening'?log.minutes:0);
-  await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=?,reading_minutes=?,listening_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,readAfter,listenAfter,log.participant_id);
+  const beforeRank=await db.prepare('SELECT lifetime_minutes FROM participants WHERE user_id=?').get(log.participant_id);
+  const oldRank=await getRank(beforeRank.lifetime_minutes);
+  const readDelta=log.activity_type==='reading'?log.minutes:0;
+  const listenDelta=log.activity_type==='listening'?log.minutes:0;
+  // نستخدم "زيادة مباشرة" بدل "اقرأ ثم اكتب" لتفادي ضياع اعتمادين يحصلان بنفس اللحظة
+  const updated=await db.prepare(`UPDATE participants SET wallet_minutes=wallet_minutes+?,lifetime_minutes=lifetime_minutes+?,reading_minutes=reading_minutes+?,listening_minutes=listening_minutes+? WHERE user_id=? RETURNING wallet_minutes,lifetime_minutes`).get(log.minutes,log.minutes,readDelta,listenDelta,log.participant_id);
+  const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
+  const walletBefore=walletAfter-log.minutes, lifeBefore=lifeAfter-log.minutes;
   await db.prepare("UPDATE activity_logs SET status='approved',reviewed_at=now(),reviewed_by=?,review_note=? WHERE id=?").run(reviewerId,note,log.id);
   await db.prepare(`INSERT INTO transactions(participant_id,kind,activity_type,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(log.participant_id,'earn',log.activity_type,log.minutes,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'activity_log',log.id,'اعتماد إنجاز',reviewerId);
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(log.participant_id,'earn',log.activity_type,log.minutes,walletBefore,walletAfter,lifeBefore,lifeAfter,'activity_log',log.id,'اعتماد إنجاز',reviewerId);
   await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(log.participant_id,'تم اعتماد إنجازك',`أضيفت ${log.minutes} دقيقة إلى رصيدك.`);
   const newRank=await getRank(lifeAfter);
   if(newRank.id!==oldRank.id){
@@ -384,14 +384,15 @@ const buyReward = db.transaction(async (rewardId, participantId)=>{
   const bought=Number(boughtRow.c);
   if(reward.purchase_limit && bought>=reward.purchase_limit) throw new Error('وصلت إلى الحد المسموح لشراء هذه المكافأة.');
   const after=p.wallet_minutes-reward.price_minutes;
-  await db.prepare('UPDATE participants SET wallet_minutes=? WHERE user_id=?').run(after,participantId);
+  const deducted=await db.prepare('UPDATE participants SET wallet_minutes=wallet_minutes-? WHERE user_id=? AND wallet_minutes>=? RETURNING wallet_minutes').get(reward.price_minutes,participantId,reward.price_minutes);
+  if(!deducted) throw new Error('رصيدك غير كافٍ لهذه المكافأة.');
   const purchase=await db.prepare('INSERT INTO purchases(participant_id,reward_id,price_minutes) VALUES(?,?,?)').run(participantId,rewardId,reward.price_minutes);
   await db.prepare('UPDATE rewards SET quantity=quantity-1 WHERE id=? AND quantity>0').run(rewardId);
   let code=voucherCode();
   while(await db.prepare('SELECT 1 FROM vouchers WHERE code=?').get(code)) code=voucherCode();
   await db.prepare('INSERT INTO vouchers(purchase_id,code,expires_at) VALUES(?,?,?)').run(purchase.lastInsertRowid,code,reward.available_until||null);
   await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(participantId,'spend',-reward.price_minutes,p.wallet_minutes,after,p.lifetime_minutes,p.lifetime_minutes,'purchase',purchase.lastInsertRowid,`استبدال: ${reward.name}`,participantId);
+    VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(participantId,'spend',-reward.price_minutes,deducted.wallet_minutes+reward.price_minutes,deducted.wallet_minutes,p.lifetime_minutes,p.lifetime_minutes,'purchase',purchase.lastInsertRowid,`استبدال: ${reward.name}`,participantId);
   await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(participantId,'تم استبدال مكافأة',`${reward.name} — رمز القسيمة ${code}`);
   return code;
 });
@@ -632,12 +633,11 @@ app.post('/quizzes/:id/submit',auth,participantOnly,wrap(async (req,res)=>{
   await db.transaction(async ()=>{
     await db.prepare("UPDATE quiz_assignments SET status='completed',completed_at=now(),score=?,awarded_points=? WHERE id=?").run(scorePct,earned,assignment.id);
     if(earned>0){
-      const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(req.session.user.id);
-      const walletAfter=p.wallet_minutes+earned, lifeAfter=p.lifetime_minutes+earned;
-      await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,req.session.user.id);
+      const updated=await db.prepare('UPDATE participants SET wallet_minutes=wallet_minutes+?,lifetime_minutes=lifetime_minutes+? WHERE user_id=? RETURNING wallet_minutes,lifetime_minutes').get(earned,earned,req.session.user.id);
+      const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
       const quiz=await db.prepare('SELECT title FROM quizzes WHERE id=?').get(assignment.quiz_id);
       await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
-        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',earned,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'quiz',assignment.id,`اختبار: ${quiz.title}`,null);
+        VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(req.session.user.id,'earn',earned,walletAfter-earned,walletAfter,lifeAfter-earned,lifeAfter,'quiz',assignment.id,`اختبار: ${quiz.title}`,null);
     }
   })();
   flash(req,'success',`نتيجتك: ${correctCount} من ${questions.length} صحيحة — حصلت على ${earned} دقيقة.`);
@@ -699,11 +699,10 @@ app.post('/admin/benefits/:id/approve',auth,adminOnly,wrap(async (req,res)=>{
     const b=await db.prepare("SELECT * FROM benefits WHERE id=? AND status='pending'").get(Number(req.params.id));
     if(!b) return;
     await db.prepare("UPDATE benefits SET status='approved',reviewed_by=?,reviewed_at=now() WHERE id=?").run(req.session.user.id,b.id);
-    const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(b.participant_id);
-    const walletAfter=p.wallet_minutes+b.awarded_points, lifeAfter=p.lifetime_minutes+b.awarded_points;
-    await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,b.participant_id);
+    const updated=await db.prepare('UPDATE participants SET wallet_minutes=wallet_minutes+?,lifetime_minutes=lifetime_minutes+? WHERE user_id=? RETURNING wallet_minutes,lifetime_minutes').get(b.awarded_points,b.awarded_points,b.participant_id);
+    const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
     await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
-      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(b.participant_id,'earn',b.awarded_points,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'benefit',b.id,'فائدة معتمدة',req.session.user.id);
+      VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(b.participant_id,'earn',b.awarded_points,walletAfter-b.awarded_points,walletAfter,lifeAfter-b.awarded_points,lifeAfter,'benefit',b.id,'فائدة معتمدة',req.session.user.id);
     await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(b.participant_id,'تم اعتماد فائدتك',`أضيفت ${b.awarded_points} دقيقة إلى رصيدك.`);
   })();
   flash(req,'success','تم اعتماد الفائدة وإضافة الدقائق.'); res.redirect('/admin/benefits');
@@ -815,12 +814,11 @@ app.post('/admin/participants/:id/adjust',auth,adminOnly,wrap(async (req,res)=>{
   if(!Number.isInteger(amount)||amount===0||!reason){flash(req,'error','أدخل عدد دقائق صحيحًا وسبب التعديل.');return res.redirect('/admin/participants');}
   try{
     await db.transaction(async ()=>{
-      const p=await db.prepare('SELECT * FROM participants WHERE user_id=?').get(id); if(!p) throw new Error('المشارك غير موجود.');
-      const walletAfter=p.wallet_minutes+amount, lifeAfter=p.lifetime_minutes+amount;
-      if(walletAfter<0||lifeAfter<0) throw new Error('لا يمكن أن يصبح الرصيد سالبًا.');
-      await db.prepare('UPDATE participants SET wallet_minutes=?,lifetime_minutes=? WHERE user_id=?').run(walletAfter,lifeAfter,id);
+      const updated=await db.prepare('UPDATE participants SET wallet_minutes=wallet_minutes+?,lifetime_minutes=lifetime_minutes+? WHERE user_id=? AND wallet_minutes+?>=0 AND lifetime_minutes+?>=0 RETURNING wallet_minutes,lifetime_minutes').get(amount,amount,id,amount,amount);
+      if(!updated) throw new Error('لا يمكن أن يصبح الرصيد سالبًا، أو أن المشارك غير موجود.');
+      const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
       await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reason,created_by)
-      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id,'adjustment',amount,p.wallet_minutes,walletAfter,p.lifetime_minutes,lifeAfter,'manual_adjustment',reason,req.session.user.id);
+      VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id,'adjustment',amount,walletAfter-amount,walletAfter,lifeAfter-amount,lifeAfter,'manual_adjustment',reason,req.session.user.id);
       await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(id,'تم تعديل رصيدك',`${amount>0?'+':''}${amount} دقيقة — ${reason}`);
     })(); flash(req,'success','تم تعديل الرصيد وتسجيل السبب في السجل.');
   }catch(e){flash(req,'error',e.message)}
@@ -930,6 +928,29 @@ app.post('/admin/vouchers/:id/use',auth,adminOnly,wrap(async (req,res)=>{
 app.post('/admin/vouchers/:id/cancel',auth,adminOnly,wrap(async (req,res)=>{
   const r=await db.prepare("UPDATE vouchers SET status='cancelled' WHERE id=? AND status='unused'").run(Number(req.params.id));
   flash(req,r.changes?'success':'error',r.changes?'تم إلغاء القسيمة.':'لا يمكن إلغاء هذه القسيمة.'); res.redirect('/admin/vouchers');
+}));
+
+function pointsForMinutes(m){
+  m=Number(m)||0;
+  return Math.min(m,100)*0.5 + Math.max(0,m-100)*0.25;
+}
+app.get('/admin/points-report',auth,adminOnly,wrap(async (req,res)=>{
+  const rows=await db.prepare(`SELECT u.id,u.name,al.weekly_goal_id,w.week_number,al.activity_type,SUM(al.minutes) minutes
+    FROM activity_logs al JOIN users u ON u.id=al.participant_id JOIN weekly_goals w ON w.id=al.weekly_goal_id
+    WHERE al.status='approved' AND u.role='participant'
+    GROUP BY u.id,u.name,al.weekly_goal_id,w.week_number,al.activity_type
+    ORDER BY u.name,w.week_number`).all();
+  const byParticipant={};
+  for(const r of rows){
+    if(!byParticipant[r.id]) byParticipant[r.id]={name:r.name,weeks:{},total:0};
+    const wk=byParticipant[r.id].weeks[r.week_number]=byParticipant[r.id].weeks[r.week_number]||{reading:0,listening:0,readingPts:0,listeningPts:0};
+    const pts=pointsForMinutes(r.minutes);
+    if(r.activity_type==='reading'){ wk.reading=Number(r.minutes); wk.readingPts=pts; }
+    else { wk.listening=Number(r.minutes); wk.listeningPts=pts; }
+    byParticipant[r.id].total+=pts;
+  }
+  const list=Object.values(byParticipant).sort((a,b)=>b.total-a.total);
+  res.renderView('admin-points-report',{title:'تقرير النقاط التحفيزية',list});
 }));
 
 app.get('/admin/transactions',auth,adminOnly,wrap(async (req,res)=>{
