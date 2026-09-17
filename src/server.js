@@ -441,6 +441,88 @@ app.get('/leaderboard',auth,roles('participant','supervisor','manager'),wrap(asy
   res.renderView('leaderboard',{title:'المتميزون',rows,myRank:myIndex>=0?myIndex+1:null,myUserId:req.session.user.id});
 }));
 
+// متتبع وقت إنهاء الكتاب (ميزة مستقلة، لا تؤثر على الدقائق الأسبوعية أو الرصيد)
+const DEFAULT_PAGES_PER_HOUR=20;
+function computeBookStats(book,sessions){
+  const totalRead=sessions.reduce((s,x)=>s+x.pages_read,0);
+  const totalMinutes=sessions.reduce((s,x)=>s+x.duration_minutes,0);
+  const hasData=sessions.length>0 && totalMinutes>0;
+  const pagesPerHour=hasData?(totalRead/(totalMinutes/60)):DEFAULT_PAGES_PER_HOUR;
+  const pagesRemaining=Math.max(0,book.total_pages-totalRead);
+  const progressPct=book.total_pages>0?Math.min(100,Math.round(totalRead/book.total_pages*100)):0;
+  const remainingMinutesTotal=pagesPerHour>0?Math.round((pagesRemaining/pagesPerHour)*60):null;
+  const distinctDays=new Set(sessions.map(s=>new Date(s.created_at).toISOString().slice(0,10))).size;
+  const avgMinutesPerDay=distinctDays>0?totalMinutes/distinctDays:null;
+  let daysRemaining=null, finishDate=null;
+  if(avgMinutesPerDay&&pagesPerHour>0){
+    const pagesPerDay=pagesPerHour*(avgMinutesPerDay/60);
+    if(pagesPerDay>0){ daysRemaining=Math.ceil(pagesRemaining/pagesPerDay); finishDate=new Date(Date.now()+daysRemaining*86400000); }
+  }
+  return {totalRead,totalMinutes,hasData,pagesPerHour,pagesRemaining,progressPct,remainingMinutesTotal,daysRemaining,finishDate,finished:pagesRemaining<=0};
+}
+function whatIfFinish(pagesRemaining,pagesPerHour,dailyMinutes){
+  if(pagesPerHour<=0||pagesRemaining<=0) return null;
+  const pagesPerDay=pagesPerHour*(dailyMinutes/60);
+  if(pagesPerDay<=0) return null;
+  const days=Math.ceil(pagesRemaining/pagesPerDay);
+  return {days,date:new Date(Date.now()+days*86400000)};
+}
+function fmtDuration(totalMinutes){
+  if(totalMinutes==null) return null;
+  const h=Math.floor(totalMinutes/60), m=Math.round(totalMinutes%60);
+  if(h<=0) return `${m} دقيقة`;
+  if(m<=0) return `${h} ساعة`;
+  return `${h} ساعة و${m} دقيقة`;
+}
+app.get('/my-books',auth,participantOnly,wrap(async (req,res)=>{
+  const books=await db.prepare('SELECT * FROM reading_books WHERE participant_id=? ORDER BY finished_at IS NOT NULL, id DESC').all(req.session.user.id);
+  const withStats=await Promise.all(books.map(async b=>{
+    const sessions=await db.prepare('SELECT * FROM reading_sessions WHERE book_id=? ORDER BY created_at').all(b.id);
+    return {...b,stats:computeBookStats(b,sessions)};
+  }));
+  res.renderView('my-books',{title:'كتبي',books:withStats});
+}));
+app.post('/my-books/add',auth,participantOnly,wrap(async (req,res)=>{
+  const title=(req.body.title||'').trim();
+  const totalPages=Number(req.body.total_pages);
+  if(!title||!totalPages||totalPages<1){flash(req,'error','أدخل اسم الكتاب وعدد الصفحات بشكل صحيح.');return res.redirect('/my-books');}
+  await db.prepare('INSERT INTO reading_books(participant_id,title,total_pages) VALUES(?,?,?)').run(req.session.user.id,title,totalPages);
+  flash(req,'success','تمت إضافة الكتاب.');
+  res.redirect('/my-books');
+}));
+app.get('/my-books/:id',auth,participantOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const book=await db.prepare('SELECT * FROM reading_books WHERE id=? AND participant_id=?').get(id,req.session.user.id);
+  if(!book) return res.renderView('message',{title:'غير موجود',message:'الكتاب غير موجود.'});
+  const sessions=await db.prepare('SELECT * FROM reading_sessions WHERE book_id=? ORDER BY created_at DESC').all(id);
+  const stats=computeBookStats(book,sessions.slice().reverse());
+  const dailyOptions=[10,20,30,45,60];
+  const selectedDaily=dailyOptions.includes(Number(req.query.daily))?Number(req.query.daily):20;
+  const projections=dailyOptions.map(m=>({minutes:m,result:whatIfFinish(stats.pagesRemaining,stats.pagesPerHour,m)}));
+  res.renderView('book-tracker',{title:book.title,book,sessions,stats,dailyOptions,selectedDaily,projections,fmtDuration});
+}));
+app.post('/my-books/:id/session',auth,participantOnly,wrap(async (req,res)=>{
+  const id=Number(req.params.id);
+  const book=await db.prepare('SELECT * FROM reading_books WHERE id=? AND participant_id=?').get(id,req.session.user.id);
+  if(!book) return res.redirect('/my-books');
+  const pages=Number(req.body.pages_read), minutes=Number(req.body.duration_minutes);
+  if(!pages||pages<1||!minutes||minutes<1){flash(req,'error','أدخل عدد الصفحات والدقائق بشكل صحيح.');return res.redirect('/my-books/'+id);}
+  await db.prepare('INSERT INTO reading_sessions(book_id,pages_read,duration_minutes) VALUES(?,?,?)').run(id,pages,minutes);
+  const already=await db.prepare('SELECT COALESCE(SUM(pages_read),0) s FROM reading_sessions WHERE book_id=?').get(id);
+  if(Number(already.s)>=book.total_pages){
+    await db.prepare('UPDATE reading_books SET finished_at=now() WHERE id=? AND finished_at IS NULL').run(id);
+    flash(req,'success','🎉 مبروك! أنهيت الكتاب بالكامل.');
+  } else {
+    flash(req,'success','تم تسجيل جلسة القراءة.');
+  }
+  res.redirect('/my-books/'+id);
+}));
+app.post('/my-books/:id/delete',auth,participantOnly,wrap(async (req,res)=>{
+  await db.prepare('DELETE FROM reading_books WHERE id=? AND participant_id=?').run(Number(req.params.id),req.session.user.id);
+  flash(req,'success','تم حذف الكتاب.');
+  res.redirect('/my-books');
+}));
+
 app.get('/suggestions',auth,participantOnly,wrap(async (req,res)=>{
   const items=await db.prepare('SELECT * FROM suggestions WHERE active=1 ORDER BY section,category,sort_order').all();
   const sectionNames=[...new Set(items.map(i=>i.section))];
