@@ -96,19 +96,6 @@ self.addEventListener('notificationclick',function(event){
 `;
 app.get('/sw.js',(req,res)=> res.type('application/javascript; charset=utf-8').send(SERVICE_WORKER_JS));
 app.get('/push/vapid-public-key',(req,res)=> res.type('text/plain').send(VAPID_PUBLIC_KEY));
-app.post('/push/subscribe',auth,wrap(async (req,res)=>{
-  const sub=req.body;
-  if(!sub||!sub.endpoint||!sub.keys) return res.status(400).json({error:'invalid subscription'});
-  await db.prepare(`INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth) VALUES(?,?,?,?)
-    ON CONFLICT (endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth`)
-    .run(req.session.user.id,sub.endpoint,sub.keys.p256dh,sub.keys.auth);
-  res.json({ok:true});
-}));
-app.post('/push/unsubscribe',auth,wrap(async (req,res)=>{
-  const endpoint=req.body.endpoint;
-  if(endpoint) await db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?').run(endpoint,req.session.user.id);
-  res.json({ok:true});
-}));
 const icons = require('./icons-data');
 const iconBuf = {
   apple: Buffer.from(icons.apple,'base64'),
@@ -156,6 +143,19 @@ async function expireVouchers(){
   await db.prepare("UPDATE vouchers SET status='expired' WHERE status='unused' AND expires_at IS NOT NULL AND expires_at < now()").run();
 }
 function auth(req,res,next){ if(!req.session.user) return res.redirect('/login'); next(); }
+app.post('/push/subscribe',auth,wrap(async (req,res)=>{
+  const sub=req.body;
+  if(!sub||!sub.endpoint||!sub.keys) return res.status(400).json({error:'invalid subscription'});
+  await db.prepare(`INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth) VALUES(?,?,?,?)
+    ON CONFLICT (endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth`)
+    .run(req.session.user.id,sub.endpoint,sub.keys.p256dh,sub.keys.auth);
+  res.json({ok:true});
+}));
+app.post('/push/unsubscribe',auth,wrap(async (req,res)=>{
+  const endpoint=req.body.endpoint;
+  if(endpoint) await db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?').run(endpoint,req.session.user.id);
+  res.json({ok:true});
+}));
 function roles(...allowed){ return (req,res,next)=> allowed.includes(req.session.user?.role) ? next() : res.renderView('message',{title:'غير مصرح',message:req.session.user?.role==='participant'?'هذا الحساب مخصص للمشاركين، ولا يملك صلاحية دخول لوحة الإدارة.':'لا تملك صلاحية الوصول إلى هذه الصفحة.'},403); }
 function participantOnly(req,res,next){ return roles('participant')(req,res,next); }
 function adminOnly(req,res,next){ return roles('supervisor','manager')(req,res,next); }
