@@ -7,12 +7,14 @@ const cookieSession = require('cookie-session');
 const ejs = require('ejs');
 const db = require('./db');
 const viewTemplates = require('./views-data');
-const webpush = require('web-push');
+let webpush=null;
+try{ webpush=require('web-push'); }catch(e){ console.error('web-push غير مثبّت — إشعارات الجوال معطّلة مؤقتًا.'); }
 
 const VAPID_PUBLIC_KEY='BORuqRhiR-lQnqxdGUBVJC8UrgLbpIJUK2FTzKO3eTIZsjMUBIT3QDa9WZo4IUCSmruLI5NtgioaQnTFmv9oU5U';
 const VAPID_PRIVATE_KEY='5wKZiCxfvKNHyyzpAGNtT3nsyLQUsoiOYIi4b_vFsvw';
-webpush.setVapidDetails('mailto:admin@maktabat-alqari.app',VAPID_PUBLIC_KEY,VAPID_PRIVATE_KEY);
+if(webpush) webpush.setVapidDetails('mailto:admin@maktabat-alqari.app',VAPID_PUBLIC_KEY,VAPID_PRIVATE_KEY);
 async function sendPushToUser(userId,title,body){
+  if(!webpush) return;
   try{
     const subs=await db.prepare('SELECT * FROM push_subscriptions WHERE user_id=?').all(userId);
     for(const s of subs){
