@@ -7,6 +7,29 @@ const cookieSession = require('cookie-session');
 const ejs = require('ejs');
 const db = require('./db');
 const viewTemplates = require('./views-data');
+const webpush = require('web-push');
+
+const VAPID_PUBLIC_KEY='BORuqRhiR-lQnqxdGUBVJC8UrgLbpIJUK2FTzKO3eTIZsjMUBIT3QDa9WZo4IUCSmruLI5NtgioaQnTFmv9oU5U';
+const VAPID_PRIVATE_KEY='5wKZiCxfvKNHyyzpAGNtT3nsyLQUsoiOYIi4b_vFsvw';
+webpush.setVapidDetails('mailto:admin@maktabat-alqari.app',VAPID_PUBLIC_KEY,VAPID_PRIVATE_KEY);
+async function sendPushToUser(userId,title,body){
+  try{
+    const subs=await db.prepare('SELECT * FROM push_subscriptions WHERE user_id=?').all(userId);
+    for(const s of subs){
+      try{
+        await webpush.sendNotification({endpoint:s.endpoint,keys:{p256dh:s.p256dh,auth:s.auth}},JSON.stringify({title,body}));
+      }catch(e){
+        if(e.statusCode===410||e.statusCode===404){
+          await db.prepare('DELETE FROM push_subscriptions WHERE id=?').run(s.id);
+        }
+      }
+    }
+  }catch(e){ /* لا نكسر بقية العملية بسبب فشل إشعار */ }
+}
+async function notifyUser(userId,title,body){
+  await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(userId,title,body);
+  await sendPushToUser(userId,title,body);
+}
 
 const AR_MONTHS=['يناير','فبراير','مارس','أبريل','مايو','يونيو','يوليو','أغسطس','سبتمبر','أكتوبر','نوفمبر','ديسمبر'];
 function fmtDate(d){
@@ -56,6 +79,34 @@ app.use(express.urlencoded({extended:true}));
 app.use(express.json());
 const styleCss = require('./style-data');
 app.get('/style.css',(req,res)=> res.type('text/css; charset=utf-8').send(styleCss));
+const SERVICE_WORKER_JS=`
+self.addEventListener('push',function(event){
+  var data={};
+  try{ data=event.data.json(); }catch(e){ data={title:'مكتبة القارئ',body:event.data?event.data.text():''}; }
+  var title=data.title||'مكتبة القارئ';
+  var options={body:data.body||'',icon:'/icon-192.png',badge:'/icon-192.png',dir:'rtl',lang:'ar'};
+  event.waitUntil(self.registration.showNotification(title,options));
+});
+self.addEventListener('notificationclick',function(event){
+  event.notification.close();
+  event.waitUntil(clients.openWindow('/'));
+});
+`;
+app.get('/sw.js',(req,res)=> res.type('application/javascript; charset=utf-8').send(SERVICE_WORKER_JS));
+app.get('/push/vapid-public-key',(req,res)=> res.type('text/plain').send(VAPID_PUBLIC_KEY));
+app.post('/push/subscribe',auth,wrap(async (req,res)=>{
+  const sub=req.body;
+  if(!sub||!sub.endpoint||!sub.keys) return res.status(400).json({error:'invalid subscription'});
+  await db.prepare(`INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth) VALUES(?,?,?,?)
+    ON CONFLICT (endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth`)
+    .run(req.session.user.id,sub.endpoint,sub.keys.p256dh,sub.keys.auth);
+  res.json({ok:true});
+}));
+app.post('/push/unsubscribe',auth,wrap(async (req,res)=>{
+  const endpoint=req.body.endpoint;
+  if(endpoint) await db.prepare('DELETE FROM push_subscriptions WHERE endpoint=? AND user_id=?').run(endpoint,req.session.user.id);
+  res.json({ok:true});
+}));
 const icons = require('./icons-data');
 const iconBuf = {
   apple: Buffer.from(icons.apple,'base64'),
@@ -341,10 +392,10 @@ const approveLog = db.transaction(async (logId, reviewerId, note='')=>{
   await db.prepare("UPDATE activity_logs SET status='approved',reviewed_at=now(),reviewed_by=?,review_note=? WHERE id=?").run(reviewerId,note,log.id);
   await db.prepare(`INSERT INTO transactions(participant_id,kind,activity_type,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`).run(log.participant_id,'earn',log.activity_type,log.minutes,walletBefore,walletAfter,lifeBefore,lifeAfter,'activity_log',log.id,'اعتماد إنجاز',reviewerId);
-  await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(log.participant_id,'تم اعتماد إنجازك',`أضيفت ${log.minutes} دقيقة إلى رصيدك.`);
+  await notifyUser(log.participant_id,'تم اعتماد إنجازك',`أضيفت ${log.minutes} دقيقة إلى رصيدك.`);
   const newRank=await getRank(lifeAfter);
   if(newRank.id!==oldRank.id){
-    await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(log.participant_id,'🎉 تمت ترقيتك!',`أصبحت الآن: ${newRank.icon} ${newRank.name}`);
+    await notifyUser(log.participant_id,'🎉 تمت ترقيتك!',`أصبحت الآن: ${newRank.icon} ${newRank.name}`);
   }
 });
 
@@ -393,7 +444,7 @@ const buyReward = db.transaction(async (rewardId, participantId)=>{
   await db.prepare('INSERT INTO vouchers(purchase_id,code,expires_at) VALUES(?,?,?)').run(purchase.lastInsertRowid,code,reward.available_until||null);
   await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
     VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(participantId,'spend',-reward.price_minutes,deducted.wallet_minutes+reward.price_minutes,deducted.wallet_minutes,p.lifetime_minutes,p.lifetime_minutes,'purchase',purchase.lastInsertRowid,`استبدال: ${reward.name}`,participantId);
-  await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(participantId,'تم استبدال مكافأة',`${reward.name} — رمز القسيمة ${code}`);
+  await notifyUser(participantId,'تم استبدال مكافأة',`${reward.name} — رمز القسيمة ${code}`);
   return code;
 });
 
@@ -538,6 +589,8 @@ app.post('/messages/send',auth,messagingOnly,wrap(async (req,res)=>{
   const body=(req.body.body||'').trim();
   if(!body){return res.redirect('/messages');}
   await db.prepare('INSERT INTO direct_messages(participant_id,sender_role,sender_id,body) VALUES(?,?,?,?)').run(req.session.user.id,'participant',req.session.user.id,body.slice(0,1000));
+  const admins=await db.prepare("SELECT id FROM users WHERE role IN ('supervisor','manager')").all();
+  for(const a of admins) await sendPushToUser(a.id,`رسالة من ${req.session.user.name}`,body.slice(0,120));
   res.redirect('/messages');
 }));
 app.get('/api/messages/poll',auth,messagingOnly,wrap(async (req,res)=>{
@@ -566,7 +619,10 @@ app.get('/admin/messages/:id',auth,adminOnly,wrap(async (req,res)=>{
 app.post('/admin/messages/:id/send',auth,adminOnly,wrap(async (req,res)=>{
   const pid=Number(req.params.id);
   const body=(req.body.body||'').trim();
-  if(body) await db.prepare('INSERT INTO direct_messages(participant_id,sender_role,sender_id,body) VALUES(?,?,?,?)').run(pid,'admin',req.session.user.id,body.slice(0,1000));
+  if(body){
+    await db.prepare('INSERT INTO direct_messages(participant_id,sender_role,sender_id,body) VALUES(?,?,?,?)').run(pid,'admin',req.session.user.id,body.slice(0,1000));
+    await sendPushToUser(pid,'رسالة من المشرف',body.slice(0,120));
+  }
   res.redirect('/admin/messages/'+pid);
 }));
 app.get('/api/admin/messages/:id/poll',auth,adminOnly,wrap(async (req,res)=>{
@@ -637,6 +693,58 @@ app.post('/challenges/:id/ready',auth,challengesOnly,wrap(async (req,res)=>{
   else await db.prepare('UPDATE challenges SET opponent_ready=1 WHERE id=?').run(id);
   res.redirect('/challenges/'+id);
 }));
+const REMINDER_MESSAGES=[
+  '📖 «مَن سلك طريقًا يلتمس فيه علمًا سهّل الله له به طريقًا إلى الجنة» — رواه مسلم. باقي وقت كافي تكمّل هدفك!',
+  '🌟 «اقْرَأْ بِاسْمِ رَبِّكَ الَّذِي خَلَقَ» — أول أمر بالقرآن كان اقرأ. خصص شوي من وقتك اليوم.',
+  '💡 كل صفحة تقرأها أو دقيقة تستمع فيها خطوة تقرّبك من هدف هذا الأسبوع — لا توقف زخمك!',
+  '🕌 «خيركم من تعلّم القرآن وعلّمه» — رواه البخاري. اجعل اليوم فرصة لاقتراب أكبر من هدفك.',
+  '⏳ الأسبوع يمشي بسرعة، وهدفك القريب أقرب مما تتوقع — سجّل إنجازك الآن قبل ما ينتهي الوقت.',
+  '🌱 «العلم نور» — كل دقيقة قراءة أو استماع تزرع نورًا يبقى معك. كمّل هدفك اليوم.'
+];
+function pickReminderMessage(){ return REMINDER_MESSAGES[Math.floor(Math.random()*REMINDER_MESSAGES.length)]; }
+async function sendWeeklyReminderToOne(userId,force){
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  if(!week) return {sent:false,reason:'لا يوجد أسبوع مفتوح حاليًا.'};
+  const rows=await db.prepare(`SELECT activity_type,COALESCE(SUM(minutes),0) total FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND status='approved' GROUP BY activity_type`).all(userId,week.id);
+  const progress={reading:0,listening:0};
+  rows.forEach(r=>{ progress[r.activity_type]=Number(r.total); });
+  const done=progress.reading>=week.reading_target && progress.listening>=week.listening_target;
+  if(done && !force) return {sent:false,reason:'المشارك أكمل هدف الأسبوع بالفعل.'};
+  const readRemain=Math.max(0,week.reading_target-progress.reading);
+  const listenRemain=Math.max(0,week.listening_target-progress.listening);
+  const title='📚 تذكير بإنجاز الأسبوع';
+  let body=pickReminderMessage();
+  if(!done){
+    const parts=[];
+    if(readRemain>0) parts.push(`${readRemain} دقيقة قراءة`);
+    if(listenRemain>0) parts.push(`${listenRemain} دقيقة استماع`);
+    body=`باقي عليك ${parts.join(' و')} لإكمال هدف الأسبوع. ${body}`;
+  }
+  await sendPushToUser(userId,title,body);
+  return {sent:true};
+}
+async function sendWeeklyRemindersToAll(){
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  if(!week) return {sent:0};
+  const participants=await db.prepare("SELECT id FROM users WHERE role='participant' AND active=1").all();
+  let sent=0;
+  for(const p of participants){
+    const r=await sendWeeklyReminderToOne(p.id,false);
+    if(r.sent) sent++;
+  }
+  return {sent};
+}
+app.post('/admin/participants/:id/test-reminder',auth,adminOnly,wrap(async (req,res)=>{
+  const result=await sendWeeklyReminderToOne(Number(req.params.id),true);
+  flash(req,result.sent?'success':'error',result.sent?'تم إرسال التذكير (لو عنده إشعارات مفعّلة).':(result.reason||'تعذّر الإرسال.'));
+  res.redirect('/admin/participants');
+}));
+app.get('/api/cron/weekly-reminder',wrap(async (req,res)=>{
+  if(req.query.key!=='maktabat-reminder-2026') return res.status(403).json({error:'forbidden'});
+  const result=await sendWeeklyRemindersToAll();
+  res.json(result);
+}));
+
 app.get('/api/challenges/:id/status',auth,challengesOnly,wrap(async (req,res)=>{
   const challenge=await db.prepare('SELECT status,challenger_id,opponent_id,challenger_ready,opponent_ready FROM challenges WHERE id=?').get(Number(req.params.id));
   if(!challenge||(challenge.challenger_id!==req.session.user.id&&challenge.opponent_id!==req.session.user.id)) return res.status(404).json({completed:false,bothReady:false});
@@ -670,8 +778,8 @@ app.post('/api/challenges/:id/answer',auth,challengesOnly,wrap(async (req,res)=>
       const winnerId=scoreA===scoreB?null:(scoreA>scoreB?challenge.challenger_id:challenge.opponent_id);
       await db.prepare("UPDATE challenges SET status='completed',completed_at=now(),winner_id=? WHERE id=?").run(winnerId,id);
       const msg=winnerId?`انتهى التحدي! ${winnerId===challenge.challenger_id?challenge.challenger_name:challenge.opponent_name} فاز 🏆`:'انتهى التحدي بالتعادل 🤝';
-      await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(challenge.challenger_id,'نتيجة التحدي',msg);
-      await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(challenge.opponent_id,'نتيجة التحدي',msg);
+      await notifyUser(challenge.challenger_id,'نتيجة التحدي',msg);
+      await notifyUser(challenge.opponent_id,'نتيجة التحدي',msg);
     }
   }
   res.json({correct:isCorrect,finished});
@@ -785,7 +893,7 @@ app.post('/admin/benefits/:id/approve',auth,adminOnly,wrap(async (req,res)=>{
     const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
     await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reference_id,reason,created_by)
       VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(b.participant_id,'earn',b.awarded_points,walletAfter-b.awarded_points,walletAfter,lifeAfter-b.awarded_points,lifeAfter,'benefit',b.id,'فائدة معتمدة',req.session.user.id);
-    await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(b.participant_id,'تم اعتماد فائدتك',`أضيفت ${b.awarded_points} دقيقة إلى رصيدك.`);
+    await notifyUser(b.participant_id,'تم اعتماد فائدتك',`أضيفت ${b.awarded_points} دقيقة إلى رصيدك.`);
   })();
   flash(req,'success','تم اعتماد الفائدة وإضافة الدقائق.'); res.redirect('/admin/benefits');
 }));
@@ -793,7 +901,7 @@ app.post('/admin/benefits/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
   const r=await db.prepare("UPDATE benefits SET status='rejected',reviewed_by=?,review_note=?,reviewed_at=now() WHERE id=? AND status='pending'").run(req.session.user.id,req.body.note||'',Number(req.params.id));
   if(r.changes){
     const b=await db.prepare('SELECT participant_id FROM benefits WHERE id=?').get(Number(req.params.id));
-    await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(b.participant_id,'تم رفض الفائدة',req.body.note||'راجع المشرف لمعرفة التفاصيل.');
+    await notifyUser(b.participant_id,'تم رفض الفائدة',req.body.note||'راجع المشرف لمعرفة التفاصيل.');
   }
   flash(req,'success','تم رفض الفائدة.'); res.redirect('/admin/benefits');
 }));
@@ -838,7 +946,7 @@ app.post('/admin/approvals/:id/reject',auth,adminOnly,wrap(async (req,res)=>{
   const r=await db.prepare("UPDATE activity_logs SET status='rejected',reviewed_at=now(),reviewed_by=?,review_note=? WHERE id=? AND status='pending'").run(req.session.user.id,req.body.note||'',Number(req.params.id));
   if(r.changes){
     const log=await db.prepare('SELECT participant_id FROM activity_logs WHERE id=?').get(Number(req.params.id));
-    await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(log.participant_id,'تم رفض الإنجاز',req.body.note||'راجع المشرف لمعرفة التفاصيل.');
+    await notifyUser(log.participant_id,'تم رفض الإنجاز',req.body.note||'راجع المشرف لمعرفة التفاصيل.');
     flash(req,'success','تم رفض الإنجاز.');
   } else flash(req,'error','الإنجاز عولج مسبقًا.');
   res.redirect('/admin/approvals');
@@ -901,7 +1009,7 @@ app.post('/admin/participants/:id/adjust',auth,adminOnly,wrap(async (req,res)=>{
       const walletAfter=updated.wallet_minutes, lifeAfter=updated.lifetime_minutes;
       await db.prepare(`INSERT INTO transactions(participant_id,kind,amount,wallet_before,wallet_after,lifetime_before,lifetime_after,reference_type,reason,created_by)
       VALUES(?,?,?,?,?,?,?,?,?,?)`).run(id,'adjustment',amount,walletAfter-amount,walletAfter,lifeAfter-amount,lifeAfter,'manual_adjustment',reason,req.session.user.id);
-      await db.prepare('INSERT INTO notifications(user_id,title,body) VALUES(?,?,?)').run(id,'تم تعديل رصيدك',`${amount>0?'+':''}${amount} دقيقة — ${reason}`);
+      await notifyUser(id,'تم تعديل رصيدك',`${amount>0?'+':''}${amount} دقيقة — ${reason}`);
     })(); flash(req,'success','تم تعديل الرصيد وتسجيل السبب في السجل.');
   }catch(e){flash(req,'error',e.message)}
   res.redirect('/admin/participants');
