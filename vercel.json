@@ -5,5 +5,10 @@
   ],
   "routes": [
     { "src": "/(.*)", "dest": "src/server.js" }
+  ],
+  "crons": [
+    { "path": "/api/cron/weekly-reminder?key=maktabat-reminder-2026", "schedule": "0 16 * * 3" },
+    { "path": "/api/cron/last-chance-reminder?key=maktabat-reminder-2026", "schedule": "0 14 * * 6" },
+    { "path": "/api/cron/daily-reminders?key=maktabat-reminder-2026", "schedule": "0 17 * * *" }
   ]
 }
