@@ -1226,7 +1226,9 @@ app.get('/admin/points-report',auth,adminOnly,wrap(async (req,res)=>{
     GROUP BY u.id,u.name,al.weekly_goal_id,w.week_number,al.activity_type
     ORDER BY u.name,w.week_number`).all();
   const byParticipant={};
+  const weekNumbersSet=new Set();
   for(const r of rows){
+    weekNumbersSet.add(r.week_number);
     if(!byParticipant[r.id]) byParticipant[r.id]={name:r.name,weeks:{},total:0};
     const wk=byParticipant[r.id].weeks[r.week_number]=byParticipant[r.id].weeks[r.week_number]||{reading:0,listening:0,readingPts:0,listeningPts:0};
     const pts=pointsForMinutes(r.minutes);
@@ -1235,7 +1237,16 @@ app.get('/admin/points-report',auth,adminOnly,wrap(async (req,res)=>{
     byParticipant[r.id].total+=pts;
   }
   const list=Object.values(byParticipant).sort((a,b)=>b.total-a.total);
-  res.renderView('admin-points-report',{title:'تقرير النقاط التحفيزية',list});
+  const weekNumbers=[...weekNumbersSet].sort((a,b)=>a-b);
+  const selectedWeek=req.query.week?Number(req.query.week):null;
+  let weekList=null;
+  if(selectedWeek){
+    weekList=Object.values(byParticipant)
+      .filter(p=>p.weeks[selectedWeek])
+      .map(p=>({name:p.name,...p.weeks[selectedWeek],weekTotal:p.weeks[selectedWeek].readingPts+p.weeks[selectedWeek].listeningPts}))
+      .sort((a,b)=>b.weekTotal-a.weekTotal);
+  }
+  res.renderView('admin-points-report',{title:'تقرير النقاط التحفيزية',list,weekNumbers,selectedWeek,weekList});
 }));
 
 app.get('/admin/transactions',auth,adminOnly,wrap(async (req,res)=>{
