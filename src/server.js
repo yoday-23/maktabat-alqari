@@ -746,6 +746,99 @@ app.get('/api/cron/weekly-reminder',wrap(async (req,res)=>{
   const result=await sendWeeklyRemindersToAll();
   res.json(result);
 }));
+async function wasRemindedRecently(userId,type,days){
+  const row=await db.prepare("SELECT id FROM reminder_log WHERE user_id=? AND reminder_type=? AND sent_at>=now()-make_interval(days=>?) LIMIT 1").get(userId,type,days);
+  return !!row;
+}
+async function logReminder(userId,type){
+  await db.prepare('INSERT INTO reminder_log(user_id,reminder_type) VALUES(?,?)').run(userId,type);
+}
+const LAST_CHANCE_MESSAGES=[
+  'الوقت يمشي! باقي شوي على إغلاق الأسبوع — لا تفوّت هدفك.',
+  'فرصتك الأخيرة هذا الأسبوع — دقائق بسيطة وتخلّص هدفك.',
+  '⏳ الأسبوع يقفل قريب — سجّل إنجازك الآن قبل ما يفوتك.'
+];
+const STREAK_LOSS_MESSAGES=[
+  'عندك سلسلة أسابيع متتالية رائعة — لا تخسرها الآن! باقي وقت بسيط.',
+  '🔥 سلسلتك بخطر! كمّل هدفك الحين قبل ما تنكسر.'
+];
+async function sendLastChanceReminders(){
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  if(!week) return {sent:0};
+  const participants=await db.prepare("SELECT id FROM users WHERE role='participant' AND active=1").all();
+  let sent=0;
+  for(const p of participants){
+    const rows=await db.prepare(`SELECT activity_type,COALESCE(SUM(minutes),0) total FROM activity_logs WHERE participant_id=? AND weekly_goal_id=? AND status='approved' GROUP BY activity_type`).all(p.id,week.id);
+    const progress={reading:0,listening:0};
+    rows.forEach(r=>{ progress[r.activity_type]=Number(r.total); });
+    const done=progress.reading>=week.reading_target && progress.listening>=week.listening_target;
+    if(done) continue;
+    const streak=await getStreak(p.id);
+    const useStreak=streak>=3;
+    const msg=useStreak?STREAK_LOSS_MESSAGES[Math.floor(Math.random()*STREAK_LOSS_MESSAGES.length)]:LAST_CHANCE_MESSAGES[Math.floor(Math.random()*LAST_CHANCE_MESSAGES.length)];
+    await sendPushToUser(p.id,useStreak?'🔥 سلسلتك بخطر!':'⏳ فرصتك الأخيرة هذا الأسبوع',msg);
+    sent++;
+  }
+  return {sent};
+}
+async function sendDailyQuestionReminders(){
+  const questions=await getTodayQuestions(5);
+  if(!questions.length) return {sent:0};
+  const participants=await db.prepare("SELECT id FROM users WHERE role='participant' AND active=1").all();
+  let sent=0;
+  for(const p of participants){
+    const answered=await db.prepare("SELECT COUNT(*) c FROM daily_answers WHERE participant_id=? AND answer_date=now()::date").get(p.id);
+    if(Number(answered.c)>=questions.length) continue;
+    await sendPushToUser(p.id,'❓ أسئلة اليوم بانتظارك','ما جاوبت على أسئلة اليوم التثقيفية بعد — جاوب عليها واكسب دقائق إضافية.');
+    sent++;
+  }
+  return {sent};
+}
+async function sendNearPromotionAlerts(){
+  const participants=await db.prepare("SELECT id FROM users WHERE role='participant' AND active=1").all();
+  let sent=0;
+  for(const p of participants){
+    if(await wasRemindedRecently(p.id,'near_promotion',7)) continue;
+    const row=await db.prepare('SELECT lifetime_minutes FROM participants WHERE user_id=?').get(p.id);
+    const nextRank=await getNextRank(row.lifetime_minutes);
+    if(!nextRank) continue;
+    const remain=nextRank.min_minutes-row.lifetime_minutes;
+    if(remain>0 && remain<=50){
+      await sendPushToUser(p.id,'🏆 اقتربت من رتبة جديدة!',`باقي عليك ${remain} دقيقة بس ووصلت لرتبة ${nextRank.icon} ${nextRank.name}!`);
+      await logReminder(p.id,'near_promotion');
+      sent++;
+    }
+  }
+  return {sent};
+}
+async function sendInactivityAlerts(){
+  const participants=await db.prepare("SELECT id FROM users WHERE role='participant' AND active=1").all();
+  let sent=0;
+  for(const p of participants){
+    if(await wasRemindedRecently(p.id,'inactivity',7)) continue;
+    const last=await db.prepare("SELECT MAX(submitted_at) m FROM activity_logs WHERE participant_id=? AND status='approved'").get(p.id);
+    const lastDate=last.m?new Date(last.m):null;
+    const daysSince=lastDate?(Date.now()-lastDate.getTime())/86400000:9999;
+    if(daysSince>=14){
+      await sendPushToUser(p.id,'💤 وحشتنا قراءتك!','مرّ وقت طويل من آخر إنجاز لك — نورنا برجوعك، ابدأ بخطوة بسيطة اليوم.');
+      await logReminder(p.id,'inactivity');
+      sent++;
+    }
+  }
+  return {sent};
+}
+app.get('/api/cron/last-chance-reminder',wrap(async (req,res)=>{
+  if(req.query.key!=='maktabat-reminder-2026') return res.status(403).json({error:'forbidden'});
+  const result=await sendLastChanceReminders();
+  res.json(result);
+}));
+app.get('/api/cron/daily-reminders',wrap(async (req,res)=>{
+  if(req.query.key!=='maktabat-reminder-2026') return res.status(403).json({error:'forbidden'});
+  const a=await sendDailyQuestionReminders();
+  const b=await sendNearPromotionAlerts();
+  const c=await sendInactivityAlerts();
+  res.json({dailyQuestion:a.sent,nearPromotion:b.sent,inactivity:c.sent});
+}));
 
 app.get('/api/challenges/:id/status',auth,challengesOnly,wrap(async (req,res)=>{
   const challenge=await db.prepare('SELECT status,challenger_id,opponent_id,challenger_ready,opponent_ready FROM challenges WHERE id=?').get(Number(req.params.id));
