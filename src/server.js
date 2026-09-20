@@ -489,9 +489,21 @@ app.get('/history',auth,participantOnly,wrap(async (req,res)=>{
 app.get('/leaderboard',auth,roles('participant','supervisor','manager'),wrap(async (req,res)=>{
   const isAdmin=req.session.user.role!=='participant';
   if(!isAdmin&&(await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
-  const rows=await db.prepare(`SELECT u.id user_id,u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 30`).all();
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  let rows=[];
+  if(week){
+    rows=await db.prepare(`SELECT u.id user_id,u.name,
+      COALESCE(SUM(CASE WHEN al.activity_type='reading' THEN al.minutes END),0) reading_minutes,
+      COALESCE(SUM(CASE WHEN al.activity_type='listening' THEN al.minutes END),0) listening_minutes,
+      COALESCE(SUM(al.minutes),0) lifetime_minutes
+      FROM users u
+      LEFT JOIN activity_logs al ON al.participant_id=u.id AND al.weekly_goal_id=? AND al.status='approved'
+      WHERE u.role='participant' AND u.active=1
+      GROUP BY u.id,u.name
+      ORDER BY lifetime_minutes DESC LIMIT 30`).all(week.id);
+  }
   const myIndex=rows.findIndex(r=>r.user_id===req.session.user.id);
-  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:myIndex>=0?myIndex+1:null,myUserId:req.session.user.id});
+  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:myIndex>=0?myIndex+1:null,myUserId:req.session.user.id,week});
 }));
 
 // متتبع وقت إنهاء الكتاب (ميزة مستقلة، لا تؤثر على الدقائق الأسبوعية أو الرصيد)
@@ -935,8 +947,20 @@ app.get('/guardian',auth,guardianOnly,wrap(async (req,res)=>{
   res.renderView('guardian-home',{title:'أولياء الأمور',participantsCount:Number(stats.c)});
 }));
 app.get('/guardian/leaderboard',auth,guardianOnly,wrap(async (req,res)=>{
-  const rows=await db.prepare(`SELECT u.id user_id,u.name,p.* FROM participants p JOIN users u ON u.id=p.user_id WHERE u.active=1 ORDER BY p.lifetime_minutes DESC LIMIT 30`).all();
-  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:null,myUserId:null});
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  let rows=[];
+  if(week){
+    rows=await db.prepare(`SELECT u.id user_id,u.name,
+      COALESCE(SUM(CASE WHEN al.activity_type='reading' THEN al.minutes END),0) reading_minutes,
+      COALESCE(SUM(CASE WHEN al.activity_type='listening' THEN al.minutes END),0) listening_minutes,
+      COALESCE(SUM(al.minutes),0) lifetime_minutes
+      FROM users u
+      LEFT JOIN activity_logs al ON al.participant_id=u.id AND al.weekly_goal_id=? AND al.status='approved'
+      WHERE u.role='participant' AND u.active=1
+      GROUP BY u.id,u.name
+      ORDER BY lifetime_minutes DESC LIMIT 30`).all(week.id);
+  }
+  res.renderView('leaderboard',{title:'المتميزون',rows,myRank:null,myUserId:null,week});
 }));
 app.get('/guardian/participants',auth,guardianOnly,wrap(async (req,res)=>{
   const participants=await db.prepare(`SELECT u.id,u.name,p.* FROM users u JOIN participants p ON p.user_id=u.id WHERE u.active=1 ORDER BY u.name`).all();
