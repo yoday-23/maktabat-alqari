@@ -489,7 +489,7 @@ app.get('/history',auth,participantOnly,wrap(async (req,res)=>{
 app.get('/leaderboard',auth,roles('participant','supervisor','manager'),wrap(async (req,res)=>{
   const isAdmin=req.session.user.role!=='participant';
   if(!isAdmin&&(await setting('leaderboard_enabled','1'))!=='1') return res.renderView('message',{title:'المتميزون',message:'لوحة المتميزين متوقفة حاليًا.'});
-  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE ends_at<now() ORDER BY week_number DESC LIMIT 1").get();
   let rows=[];
   if(week){
     rows=await db.prepare(`SELECT u.id user_id,u.name,
@@ -947,7 +947,7 @@ app.get('/guardian',auth,guardianOnly,wrap(async (req,res)=>{
   res.renderView('guardian-home',{title:'أولياء الأمور',participantsCount:Number(stats.c)});
 }));
 app.get('/guardian/leaderboard',auth,guardianOnly,wrap(async (req,res)=>{
-  const week=await db.prepare("SELECT * FROM weekly_goals WHERE starts_at<=now() AND ends_at>=now() ORDER BY week_number DESC LIMIT 1").get();
+  const week=await db.prepare("SELECT * FROM weekly_goals WHERE ends_at<now() ORDER BY week_number DESC LIMIT 1").get();
   let rows=[];
   if(week){
     rows=await db.prepare(`SELECT u.id user_id,u.name,
