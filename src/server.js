@@ -914,12 +914,16 @@ app.get('/quizzes/:id',auth,participantOnly,wrap(async (req,res)=>{
   const assignment=await db.prepare('SELECT qa.*,q.title,q.total_points FROM quiz_assignments qa JOIN quizzes q ON q.id=qa.quiz_id WHERE qa.id=? AND qa.participant_id=?').get(Number(req.params.id),req.session.user.id);
   if(!assignment) return res.renderView('message',{title:'غير موجود',message:'الاختبار غير موجود.'});
   if(assignment.status==='completed') return res.redirect('/quizzes');
+  if(assignment.available_from && new Date(assignment.available_from) > new Date()){
+    return res.renderView('message',{title:'قريبًا',message:'هذا الاختبار متاح ابتداءً من '+fmtDate(assignment.available_from)+'.'});
+  }
   const questions=await db.prepare('SELECT id,question_text,options,points FROM quiz_questions WHERE quiz_id=? ORDER BY sort_order,id').all(assignment.quiz_id);
   res.renderView('quiz-take',{title:assignment.title,assignment,questions});
 }));
 app.post('/quizzes/:id/submit',auth,participantOnly,wrap(async (req,res)=>{
   const assignment=await db.prepare('SELECT * FROM quiz_assignments WHERE id=? AND participant_id=?').get(Number(req.params.id),req.session.user.id);
   if(!assignment||assignment.status==='completed') return res.redirect('/quizzes');
+  if(assignment.available_from && new Date(assignment.available_from) > new Date()) return res.redirect('/quizzes');
   const questions=await db.prepare('SELECT * FROM quiz_questions WHERE quiz_id=?').all(assignment.quiz_id);
   let earned=0, correctCount=0;
   for(const q of questions){
